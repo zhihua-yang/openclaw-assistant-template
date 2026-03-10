@@ -21,7 +21,7 @@
 
 可选使用 SSH（需要提前配置 SSH key）：
 
-    git clone git@github.com:你的用户名/openclaw-assistant-template.git
+    git clone git@github.com:zhihua-yang/openclaw-assistant-template.git
     cd openclaw-assistant-template
     bash setup.sh
 
