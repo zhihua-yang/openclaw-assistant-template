@@ -15,7 +15,7 @@
 
 推荐使用 HTTPS（无需 SSH key，OpenClaw 环境直接可用）：
 
-    git clone https://github.com/你的用户名/openclaw-assistant-template.git
+    git clone https://github.com/zhihua-yang/openclaw-assistant-template.git
     cd openclaw-assistant-template
     bash setup.sh
 
