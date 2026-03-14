@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-evolve.py v3.1
+evolve.py v3.3
 - 自动检测 OpenClaw 运行时目录（.sys/ 或 .openclaw/）
 - 结构化 events.jsonl（含 tag/count 字段）
 - 量化晋升：error count >= 2 -> errors.md pending
+- 修复时区比较 bug：统一使用 UTC naive datetime
 - CLI: python3 evolve.py search <keyword> [top_n]
 """
 
@@ -12,7 +13,7 @@ import re
 import sys
 from pathlib import Path
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 BASE  = Path.home() / ".openclaw/workspace"
 MEM   = BASE / "memory/recent.md"
@@ -44,9 +45,16 @@ for _d in ["sessions", "baseline", "todo", "compact"]:
 (BASE / "memory/archive").mkdir(parents=True, exist_ok=True)
 
 
+def _to_naive_utc(dt: datetime) -> datetime:
+    """统一转为 UTC naive datetime，避免 aware/naive 混合比较报错。"""
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
 def load_recent_events(days=7):
     events = []
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
     if not LOGS.exists():
         return events
     for line in LOGS.read_text().splitlines():
@@ -55,7 +63,8 @@ def load_recent_events(days=7):
             continue
         try:
             e = json.loads(line)
-            if datetime.fromisoformat(e["ts"]) >= cutoff:
+            ts = _to_naive_utc(datetime.fromisoformat(e["ts"]))
+            if ts >= cutoff:
                 events.append(e)
         except Exception:
             pass
@@ -63,9 +72,9 @@ def load_recent_events(days=7):
 
 
 def append_event(type_: str, content: str, tags: list, count: int = 1, extra: dict = None):
-    """写入一条标准化事件到 events.jsonl"""
+    """写入一条标准化事件到 events.jsonl，时间戳带 UTC 时区。"""
     record = {
-        "ts":      datetime.now().isoformat(timespec="seconds"),
+        "ts":      datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "type":    type_,
         "tag":     tags,
         "content": content,
@@ -78,7 +87,7 @@ def append_event(type_: str, content: str, tags: list, count: int = 1, extra: di
 
 
 def search_memory(keyword: str, top_n: int = 5) -> list:
-    """逐行扫描 events.jsonl，按 count 降序返回匹配结果"""
+    """逐行扫描 events.jsonl，按 count 降序返回匹配结果。"""
     results = []
     if not LOGS.exists():
         return results
@@ -129,28 +138,26 @@ def update_memory(insights: dict):
         print("[evolve] recent.md not found, skipped")
         return
     content  = MEM.read_text()
-    ts       = datetime.now().strftime("%Y-%m-%d %H:%M")
+    ts       = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
     total    = insights["total_events"]
     tag_line = ", ".join(f"{t}x{c}" for t, c in insights["tag_summary"]) or "-"
 
-    section = f"""
-## [{ts}] 进化摘要（近7天 {total} 事件）
+    corrections_text = "\n".join(
+        f"- {c.get('old','?')} -> {c.get('new','?')}（{c.get('reason','')}）"
+        for c in insights["corrections"]
+    ) or "- 无"
+    errors_text = "\n".join(f"- {e}" for e in insights["frequent_errors"]) or "- 无"
+    caps_text   = "\n".join(f"- {c}" for c in insights["new_capabilities"]) or "- 无"
+    prefs_text  = "\n".join(f"- {p}" for p in insights["preferences"]) or "- 无"
 
-### 高频 Tag
-- {tag_line}
-
-### 用户纠正
-{chr(10).join(f"- {c.get('old','?')} -> {c.get('new','?')}（{c.get('reason','')}）" for c in insights["corrections"]) or "- 无"}
-
-### 高频错误（>=2次，待晋升）
-{chr(10).join(f"- {e}" for e in insights["frequent_errors"]) or "- 无"}
-
-### 新能力
-{chr(10).join(f"- {c}" for c in insights["new_capabilities"]) or "- 无"}
-
-### 用户偏好
-{chr(10).join(f"- {p}" for p in insights["preferences"]) or "- 无"}
-"""
+    section = (
+        f"\n## [{ts}] 进化摘要（近7天 {total} 事件）\n\n"
+        f"### 高频 Tag\n- {tag_line}\n\n"
+        f"### 用户纠正\n{corrections_text}\n\n"
+        f"### 高频错误（>=2次，待晋升）\n{errors_text}\n\n"
+        f"### 新能力\n{caps_text}\n\n"
+        f"### 用户偏好\n{prefs_text}\n"
+    )
     new_content = re.sub(
         r"## \[\d{4}-\d{2}-\d{2}.*?(?=## \[|\Z)",
         section,
@@ -170,7 +177,7 @@ def update_errors_md(insights: dict):
         ERRS.write_text("# Error Log\n\n")
 
     content = ERRS.read_text()
-    ts = datetime.now().strftime("%Y-%m-%d")
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     for err_content in insights["frequent_errors"]:
         if err_content in content:
@@ -182,15 +189,15 @@ def update_errors_md(insights: dict):
             )
             content = content.replace("monitoring", "pending")
         else:
-            content += f"""
-## [{ts}] {err_content[:60]}
-- **触发场景**：自动检测（events.jsonl）
-- **错误行为**：{err_content}
-- **正确处理**：待人工补充
-- **tag**：[auto-detected]
-- **出现次数**：2
-- **状态**：pending
-"""
+            content += (
+                f"\n## [{ts}] {err_content[:60]}\n"
+                f"- **触发场景**：自动检测（events.jsonl）\n"
+                f"- **错误行为**：{err_content}\n"
+                f"- **正确处理**：待人工补充\n"
+                f"- **tag**：[auto-detected]\n"
+                f"- **出现次数**：2\n"
+                f"- **状态**：pending\n"
+            )
     ERRS.write_text(content)
     print(f"[evolve] errors.md updated: {len(insights['frequent_errors'])} items")
 
@@ -200,7 +207,7 @@ def archive_if_needed():
         return
     lines = MEM.read_text().splitlines()
     if len(lines) > 300:
-        archive_path = BASE / f"memory/archive/{datetime.now().strftime('%Y-%m')}.md"
+        archive_path = BASE / f"memory/archive/{datetime.now(timezone.utc).strftime('%Y-%m')}.md"
         archive_path.write_text("\n".join(lines))
         MEM.write_text("\n".join(lines[-50:]))
         print(f"[evolve] archived to {archive_path}")
