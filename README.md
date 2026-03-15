@@ -1,4 +1,4 @@
-# 内网数字助手 (OpenClaw Workspace)
+# 内网数字助手 (OpenClaw Workspace) v3.4
 
 > 一套运行在本地 / 内网 OpenClaw 环境中的个人 AI 助手配置方案。  
 > 无需联网，数据完全本地存储，支持长期记忆、自动进化和定时自省。
@@ -8,13 +8,15 @@
 ## 快速开始
 
 ```bash
-git clone <your-repo-url>
-cd <repo>
+git clone https://github.com/zhihua-yang/openclaw-assistant-template.git
+cd openclaw-assistant-template
 bash setup.sh
 ```
 
 然后在 OpenClaw → Settings → Workspace 中将路径设为 `~/.openclaw/workspace`，  
 新建对话并粘贴 `setup.sh` 运行结束后打印的「激活提示词」即可完成初始化。
+
+也可以将上述三条终端命令一起贴给openclaw自动进行下载和配置。
 
 ---
 
