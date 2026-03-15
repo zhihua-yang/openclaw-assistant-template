@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-evolve.py v3.3
-- 自动检测 OpenClaw 运行时目录（.sys/ 或 .openclaw/）
-- 结构化 events.jsonl（含 tag/count 字段）
-- 量化晋升：error count >= 2 -> errors.md pending
-- 修复时区比较 bug：统一使用 UTC naive datetime
-- CLI: python3 evolve.py search <keyword> [top_n]
+evolve.py v3.4
+- v3.3: 修复时区 bug（naive/aware datetime 混用）
+- v3.4: 修复3个字段一致性 bug：
+        1. tags 字段名：兼容读取 tags / tag
+        2. capabilities：同时读 new-capability 和 learning-achievement
+        3. corrections：改为读 content 字段（无 old/new 字段）
+        新增：promoted 错误过滤；STANDARD_TYPES/FIELD_TAGS 常量
 """
 
 import json
@@ -15,16 +16,22 @@ from pathlib import Path
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
+STANDARD_TYPES = [
+    "task-done", "error-found", "system-improvement", "learning-achievement",
+    "user-correction", "automation-deployment", "error-fix", "system-monitoring",
+    "quality-verification", "new-capability", "automation-planning", "memory-compaction",
+    "pua-inspection", "quality-improvement",
+]
+
+FIELD_TAGS    = "tags"
+FIELD_TAG_ALT = "tag"
+
 BASE  = Path.home() / ".openclaw/workspace"
 MEM   = BASE / "memory/recent.md"
 ERRS  = BASE / "memory/errors.md"
 
 
 def _detect_runtime_dir(base: Path) -> Path:
-    """
-    自动检测 OpenClaw 实际使用的运行时目录。
-    优先使用已有数据的目录，fallback 到 .sys/（OpenClaw 默认）。
-    """
     candidates = [
         base / ".sys/logs/events.jsonl",
         base / ".openclaw/logs/events.jsonl",
@@ -46,7 +53,6 @@ for _d in ["sessions", "baseline", "todo", "compact"]:
 
 
 def _to_naive_utc(dt: datetime) -> datetime:
-    """统一转为 UTC naive datetime，避免 aware/naive 混合比较报错。"""
     if dt.tzinfo is not None:
         return dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt
@@ -63,22 +69,22 @@ def load_recent_events(days=7):
             continue
         try:
             e = json.loads(line)
-            ts = _to_naive_utc(datetime.fromisoformat(e["ts"]))
-            if ts >= cutoff:
+            if "ts" not in e:
+                continue
+            if _to_naive_utc(datetime.fromisoformat(e["ts"])) >= cutoff:
                 events.append(e)
-        except Exception:
+        except (json.JSONDecodeError, ValueError, KeyError):
             pass
     return events
 
 
 def append_event(type_: str, content: str, tags: list, count: int = 1, extra: dict = None):
-    """写入一条标准化事件到 events.jsonl，时间戳带 UTC 时区。"""
     record = {
-        "ts":      datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "type":    type_,
-        "tag":     tags,
-        "content": content,
-        "count":   count,
+        "ts":       datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "type":     type_,
+        "content":  content,
+        FIELD_TAGS: tags,
+        "count":    count,
     }
     if extra:
         record.update(extra)
@@ -87,7 +93,6 @@ def append_event(type_: str, content: str, tags: list, count: int = 1, extra: di
 
 
 def search_memory(keyword: str, top_n: int = 5) -> list:
-    """逐行扫描 events.jsonl，按 count 降序返回匹配结果。"""
     results = []
     if not LOGS.exists():
         return results
@@ -105,22 +110,28 @@ def search_memory(keyword: str, top_n: int = 5) -> list:
     return results[:top_n]
 
 
+def get_event_tags(e: dict) -> list:
+    """兼容 tags / tag 两种字段名。"""
+    return e.get(FIELD_TAGS, e.get(FIELD_TAG_ALT, []))
+
+
 def extract_insights(events: list) -> dict:
     corrections  = [e for e in events if e.get("type") == "user-correction"]
-    errors       = [e for e in events if e.get("type") in ("repeated-error", "user-correction")]
-    capabilities = [e for e in events if e.get("type") == "new-capability"]
+    errors       = [e for e in events if e.get("type") in (
+                        "repeated-error", "user-correction", "bug-analysis", "error-found")]
+    capabilities = [e for e in events if e.get("type") in (
+                        "new-capability", "learning-achievement")]
     preferences  = [e for e in events if e.get("type") == "preference"]
 
     error_counts = Counter()
     for e in errors:
         key = e.get("content", "")[:80]
         error_counts[key] += e.get("count", 1)
-
     frequent_errors = [e for e, c in error_counts.items() if c >= 2]
 
     all_tags = []
     for e in events:
-        all_tags.extend(e.get("tag", []))
+        all_tags.extend(get_event_tags(e))
     tag_summary = Counter(all_tags).most_common(5)
 
     return {
@@ -133,6 +144,26 @@ def extract_insights(events: list) -> dict:
     }
 
 
+def get_already_promoted_errors() -> list:
+    if not ERRS.exists():
+        return []
+    promoted = []
+    current = None
+    for line in ERRS.read_text().split("\n"):
+        if line.startswith("## [") and "] " in line:
+            current = line.split("] ", 1)[1][:80]
+        elif current and "promoted" in line:
+            promoted.append(current)
+            current = None
+    return promoted
+
+
+def _filter_promoted(errors: list) -> list:
+    promoted = get_already_promoted_errors()
+    return [e for e in errors
+            if not any(p in e[:80] or e[:80] in p for p in promoted)]
+
+
 def update_memory(insights: dict):
     if not MEM.exists():
         print("[evolve] recent.md not found, skipped")
@@ -143,20 +174,22 @@ def update_memory(insights: dict):
     tag_line = ", ".join(f"{t}x{c}" for t, c in insights["tag_summary"]) or "-"
 
     corrections_text = "\n".join(
-        f"- {c.get('old','?')} -> {c.get('new','?')}（{c.get('reason','')}）"
+        f"- {c.get('content', '(no content)')[:80]}"
         for c in insights["corrections"]
-    ) or "- 无"
-    errors_text = "\n".join(f"- {e}" for e in insights["frequent_errors"]) or "- 无"
-    caps_text   = "\n".join(f"- {c}" for c in insights["new_capabilities"]) or "- 无"
-    prefs_text  = "\n".join(f"- {p}" for p in insights["preferences"]) or "- 无"
+    ) or "- None"
+
+    filtered_errors = _filter_promoted(insights["frequent_errors"])
+    errors_text = "\n".join(f"- {e}" for e in filtered_errors) or "- None"
+    caps_text   = "\n".join(f"- {c[:100]}" for c in insights["new_capabilities"]) or "- None"
+    prefs_text  = "\n".join(f"- {p}" for p in insights["preferences"]) or "- None"
 
     section = (
-        f"\n## [{ts}] 进化摘要（近7天 {total} 事件）\n\n"
-        f"### 高频 Tag\n- {tag_line}\n\n"
-        f"### 用户纠正\n{corrections_text}\n\n"
-        f"### 高频错误（>=2次，待晋升）\n{errors_text}\n\n"
-        f"### 新能力\n{caps_text}\n\n"
-        f"### 用户偏好\n{prefs_text}\n"
+        f"\n## [{ts}] Evolution Summary (last 7d, {total} events)\n\n"
+        f"### Top Tags\n- {tag_line}\n\n"
+        f"### User Corrections\n{corrections_text}\n\n"
+        f"### Frequent Errors (>=2, pending)\n{errors_text}\n\n"
+        f"### New Capabilities\n{caps_text}\n\n"
+        f"### Preferences\n{prefs_text}\n"
     )
     new_content = re.sub(
         r"## \[\d{4}-\d{2}-\d{2}.*?(?=## \[|\Z)",
@@ -171,15 +204,14 @@ def update_memory(insights: dict):
 
 
 def update_errors_md(insights: dict):
-    if not insights["frequent_errors"]:
+    errors_to_process = _filter_promoted(insights["frequent_errors"])
+    if not errors_to_process:
         return
     if not ERRS.exists():
         ERRS.write_text("# Error Log\n\n")
-
     content = ERRS.read_text()
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-    for err_content in insights["frequent_errors"]:
+    for err_content in errors_to_process:
         if err_content in content:
             content = re.sub(
                 r"(- \*\*出现次数\*\*：)(\d+)",
@@ -199,7 +231,7 @@ def update_errors_md(insights: dict):
                 f"- **状态**：pending\n"
             )
     ERRS.write_text(content)
-    print(f"[evolve] errors.md updated: {len(insights['frequent_errors'])} items")
+    print(f"[evolve] errors.md updated: {len(errors_to_process)} items")
 
 
 def archive_if_needed():
@@ -214,8 +246,7 @@ def archive_if_needed():
 
 
 if __name__ == "__main__":
-    print(f"[evolve] using logs: {LOGS}")
-
+    print(f"[evolve] v3.4 | logs: {LOGS}")
     if len(sys.argv) >= 2 and sys.argv[1] == "search":
         if len(sys.argv) < 3:
             print("Usage: python3 evolve.py search <keyword> [top_n]")
@@ -228,7 +259,7 @@ if __name__ == "__main__":
         else:
             print(f"Top {len(results)} results for '{keyword}':\n")
             for r in results:
-                tags = ", ".join(r.get("tag", []))
+                tags = ", ".join(get_event_tags(r))
                 print(f"[{r.get('ts','')}] [{r.get('type','')}] count={r.get('count',1)}")
                 print(f"  tags: {tags}")
                 print(f"  {r.get('content','')}\n")
@@ -238,8 +269,11 @@ if __name__ == "__main__":
         update_memory(insights)
         update_errors_md(insights)
         archive_if_needed()
-
-        if insights["frequent_errors"]:
-            print(f"[evolve] Pending promotion: {insights['frequent_errors']}")
+        filtered = _filter_promoted(insights["frequent_errors"])
+        if filtered:
+            print(f"[evolve] Pending promotion: {filtered}")
+        skipped = len(insights["frequent_errors"]) - len(filtered)
+        if skipped > 0:
+            print(f"[evolve] Skipped {skipped} already-promoted error(s)")
         if insights["new_capabilities"]:
-            print(f"[evolve] New capabilities: {insights['new_capabilities']}")
+            print(f"[evolve] New capabilities: {len(insights['new_capabilities'])}")

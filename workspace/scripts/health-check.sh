@@ -14,7 +14,6 @@ disk_ok() {
   [ -n "$avail" ] && [ "$avail" -gt 1048576 ]
 }
 
-# 自动检测 OpenClaw 运行时目录
 EVENTS_FILE=""
 for candidate in \
   "$BASE/.sys/logs/events.jsonl" \
@@ -32,9 +31,9 @@ fi
 
 echo "-- Runtime dir: $(dirname $EVENTS_FILE)"
 
-check "workspace writable"      "touch \"$BASE/.wt\" && rm \"$BASE/.wt\""
-check "events.jsonl writable"   "touch \"$EVENTS_FILE\""
-check "events.jsonl JSON valid" "python3 -c \"
+check "workspace writable"       "touch \"$BASE/.wt\" && rm \"$BASE/.wt\""
+check "events.jsonl writable"    "touch \"$EVENTS_FILE\""
+check "events.jsonl JSON valid"  "python3 -c \"
 import json,sys
 bad=[]
 try:
@@ -46,13 +45,22 @@ try:
   if bad: print('bad lines:',bad); sys.exit(1)
 except FileNotFoundError: pass
 \""
-check "Disk > 1GB"               "disk_ok"
-check "IDENTITY.md exists"       "test -f \"$BASE/IDENTITY.md\""
-check "AGENTS.md exists"         "test -f \"$BASE/AGENTS.md\""
-check "memory/core.md exists"    "test -f \"$BASE/memory/core.md\""
-check "memory/errors.md exists"  "test -f \"$BASE/memory/errors.md\""
-check "scripts/evolve.py exists" "test -f \"$BASE/scripts/evolve.py\""
-check "evolve.py syntax OK"      "python3 -m py_compile \"$BASE/scripts/evolve.py\""
+check "Disk > 1GB"                "disk_ok"
+check "IDENTITY.md exists"        "test -f \"$BASE/IDENTITY.md\""
+check "AGENTS.md exists"          "test -f \"$BASE/AGENTS.md\""
+check "memory/core.md exists"     "test -f \"$BASE/memory/core.md\""
+check "memory/errors.md exists"   "test -f \"$BASE/memory/errors.md\""
+check "scripts/evolve.py exists"  "test -f \"$BASE/scripts/evolve.py\""
+check "scripts/create_event.py"   "test -f \"$BASE/scripts/create_event.py\""
+check "evolve.py syntax OK"       "python3 -m py_compile \"$BASE/scripts/evolve.py\""
+check "create_event.py syntax OK" "python3 -m py_compile \"$BASE/scripts/create_event.py\""
+check "recent events have tags"   "python3 -c \"
+import json
+lines = open('$EVENTS_FILE').readlines()[-20:]
+missing = [i+1 for i,l in enumerate(lines)
+           if l.strip() and not json.loads(l).get('tags') and not json.loads(l).get('tag')]
+if missing: print('missing tags lines:',missing); exit(1)
+\" 2>/dev/null || true"
 
 echo ""
 echo "Health Check: OK=$PASS  ERR=$FAIL"

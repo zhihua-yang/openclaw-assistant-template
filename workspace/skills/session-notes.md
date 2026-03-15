@@ -10,23 +10,33 @@
 2. 将结构化事件追加到 events.jsonl：
    ~/.openclaw/workspace/.sys/logs/events.jsonl
 
-   标准 schema：
-   {"ts":"ISO时间","type":"类型","tag":["分类","子分类"],"content":"描述","count":1}
+   强制规范（必须遵守）：
+   - 字段名用 tags（不是 tag）
+   - ts 必须带 UTC 时区（+00:00）
+   - type 必须从以下 14 个标准类型中选，不可自造
+   - content 字数须达到对应类型的最低要求
+   - tags 至少 1 个
 
-   type 枚举：
-   - user-correction：用户纠正了我的输出
-   - repeated-error：重复出现的错误
-   - new-capability：掌握了新能力或信息
-   - task-done：完成了重要任务
-   - preference：发现用户新的偏好
+   推荐写法（使用 create_event.py，自动保证所有质量标准）：
+   exec: python3 ~/.openclaw/workspace/scripts/create_event.py \
+     --type learning-achievement \
+     --content "详细描述学习内容、过程、收获和应用场景..."
 
-   写入示例：
-   exec: echo '{"ts":"2026-03-12T00:00:00","type":"new-capability","tag":["tool","shell"],"content":"描述","count":1}' \
-     >> ~/.openclaw/workspace/.sys/logs/events.jsonl
+   14个标准 type：
+   task-done / error-found / system-improvement / learning-achievement /
+   user-correction / automation-deployment / error-fix / system-monitoring /
+   quality-verification / new-capability / automation-planning /
+   memory-compaction / pua-inspection / quality-improvement
+
+   内容最低字数（中文每15字符约1单元）：
+   - learning-achievement: >= 15 单元
+   - user-correction / system-improvement: >= 10 单元
+   - task-done / error-found: >= 8 单元
+   - 其他类型: >= 5 单元
 
 3. 若本次会话有明显失误：
    - 检查 memory/errors.md 是否有同类条目
-   - 有 -> 更新该条目的出现次数 +1，若 >= 2 次改状态为 pending
+   - 有 -> 更新出现次数 +1，若 >= 2 次改状态为 pending
    - 无 -> 新增条目，状态为 monitoring
    - 不重复新增同类错误，只累计次数
 

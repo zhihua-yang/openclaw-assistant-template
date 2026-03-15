@@ -1,10 +1,10 @@
 #!/bin/bash
 # ============================================================
-# OpenClaw 内网数字助手 — 一键部署脚本 v3.3
+# OpenClaw 内网数字助手 — 一键部署脚本 v3.4
 # 用法：
-#   bash setup.sh              # 安装到 ~/.openclaw/workspace
-#   bash setup.sh /custom/path # 安装到自定义路径
-#   bash setup.sh --force      # 强制重装（覆盖已有数据）
+#   bash setup.sh                 # 安装到 ~/.openclaw/workspace
+#   bash setup.sh /custom/path    # 安装到自定义路径
+#   bash setup.sh --force         # 强制重装（覆盖已有数据）
 # ============================================================
 
 set -e
@@ -53,12 +53,14 @@ touch "$WORKSPACE/.sys/logs/events.jsonl"
 log "设置脚本执行权限..."
 chmod +x "$WORKSPACE/scripts/"*.sh 2>/dev/null || true
 chmod +x "$WORKSPACE/scripts/evolve.py" 2>/dev/null || true
+chmod +x "$WORKSPACE/scripts/create_event.py" 2>/dev/null || true   # v3.4 新增
 
 # 5. 注册 crontab 定时任务
 log "注册 crontab 定时任务..."
 
 CRON_EVOLUTION="0 0 * * * WORKSPACE=$WORKSPACE python3 $WORKSPACE/scripts/evolve.py >> $WORKSPACE/.sys/logs/cron-memory-evolution.log 2>&1"
-CRON_REFLECTION="0 9 * * 1 echo '{\"ts\":\"$(date -Iseconds)\",\"type\":\"task-done\",\"tag\":[\"cron\",\"weekly\"],\"content\":\"weekly-self-reflection scheduled trigger\",\"count\":1}' >> $WORKSPACE/.sys/logs/events.jsonl"
+# v3.4 修复：字段名从 "tag" 改为 "tags"，与 events.jsonl 规范一致
+CRON_REFLECTION="0 9 * * 1 echo '{\"ts\":\"$(date -Iseconds)\",\"type\":\"task-done\",\"tags\":[\"cron\",\"weekly\"],\"content\":\"weekly-self-reflection scheduled trigger\",\"count\":1}' >> $WORKSPACE/.sys/logs/events.jsonl"
 
 (
   crontab -l 2>/dev/null | grep -v "cron-memory-evolution\|weekly-self-reflection"

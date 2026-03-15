@@ -1,180 +1,201 @@
-# OpenClaw 内网数字助手配置模板 v3.1
+# 内网数字助手 (OpenClaw Workspace)
 
-> 零额外依赖（只需 python3 和 git），让 OpenClaw 具备“持续学习 + 自我进化”的能力。  
-> 模板目录：`workspace/`  
-> 默认安装路径：`~/.openclaw/workspace`
-
----
-
-## 核心能力
-
-- **持久记忆**：自动记住你的偏好、项目上下文、纠错记录  
-- **错误追踪**：失误自动记录到 `memory/errors.md`，重复出现会被标记为待晋升规则  
-- **自我进化**：
-  - 每日 `/memory-evolution` 聚合最近事件，生成“进化摘要”
-  - 每周 `/weekly-self-reflection` 输出量化周报，推荐 Skill 提取候选
-- **自动收尾**：检测到告别语时自动执行 `/session-notes`，静默写日志和事件  
-- **纯文件驱动**：所有行为都由 `*.md / *.py / *.sh` 定义，极易用 git 管理和审计
+> 一套运行在本地 / 内网 OpenClaw 环境中的个人 AI 助手配置方案。  
+> 无需联网，数据完全本地存储，支持长期记忆、自动进化和定时自省。
 
 ---
 
-## 仓库结构
+## 快速开始
 
 ```bash
-openclaw-assistant-template/
-├── setup.sh                 # 一键部署脚本（复制 workspace/ 到目标目录）
-├── README.md                # 本文件
-└── workspace/               # 完整 workspace 模板（和最终运行目录结构一致）
-    ├── IDENTITY.md          # 助手人格设定（名称、风格、边界）
-    ├── AGENTS.md            # Agent 行为规则与自动触发逻辑
-    ├── memory/
-    │   ├── core.md          # 用户画像（称呼、时区、偏好）
-    │   ├── project.md       # 项目上下文 + 周报存档
-    │   ├── recent.md        # 最近学习记录 + 进化摘要
-    │   └── errors.md        # 错误日志（重复错误会被标记 pending）
-    ├── skills/
-    │   ├── remember.md              # /remember：沉淀当前对话要点
-    │   ├── session-notes.md         # /session-notes：会话结束日志 + events.jsonl
-    │   ├── memory-evolution.md      # /memory-evolution：每日进化
-    │   ├── weekly-self-reflection.md# /weekly-self-reflection：每周量化周报
-    │   ├── compact.md               # /compact：压缩上下文
-    │   ├── todo.md                  # /todo：待办管理
-    │   └── health-check.md          # /health-check：系统自检
-    └── scripts/
-        ├── evolve.py        # 进化引擎：分析 events.jsonl，更新 recent/errors
-        ├── health-check.sh  # 健康检查：路径、权限、JSON 合法性
-        └── baseline.sh      # 快照：每天输出一份 baseline，支持 diff 对比
-提示：workspace/ 目录内容即为“标准方案 v3.1”的完整落地版本。
-setup.sh 所做的事情只是：把 workspace/ 原样复制到目标路径，并初始化运行时目录。
-
-安装与更新
-1. clone 仓库
-
-bash
-git clone https://github.com/zhihua-yang/openclaw-assistant-template.git
-cd openclaw-assistant-template
-2. 安装到默认 workspace（推荐）
-
-bash
+git clone <your-repo-url>
+cd <repo>
 bash setup.sh
-默认安装到：
+```
 
-text
-~/.openclaw/workspace
-3. 安装到自定义路径（可选）
+然后在 OpenClaw → Settings → Workspace 中将路径设为 `~/.openclaw/workspace`，  
+新建对话并粘贴 `setup.sh` 运行结束后打印的「激活提示词」即可完成初始化。
 
-bash
-bash setup.sh /path/to/your/workspace
-重复执行 setup.sh 相当于更新框架文件（覆盖现有 AGENTS.md、skills/、scripts/ 等）。
-如果你在运行中的 workspace 里做了个性化修改，建议只改这些文件，并在 git 里 ignore 它们：
+---
 
-workspace/IDENTITY.md
+## 目录结构
 
-workspace/memory/core.md
+```
+workspace/
+├── IDENTITY.md               # 助手人格设定
+├── AGENTS.md                 # 核心行为规则 & 事件写入规范
+├── memory/
+│   ├── core.md               # 用户基本信息
+│   ├── project.md            # 当前项目上下文
+│   ├── recent.md             # 近期活动摘要（evolve.py 自动维护）
+│   ├── errors.md             # 错误记录（状态：monitoring / pending / promoted）
+│   └── archive/              # 历史压缩归档
+├── skills/
+│   ├── session-notes.md      # /session-notes 技能
+│   ├── remember.md           # /remember 技能
+│   ├── weekly-self-reflection.md
+│   ├── compact.md
+│   ├── todo.md
+│   └── health-check.md
+├── scripts/
+│   ├── evolve.py             # 记忆进化主程序（cron 每天 00:00）
+│   ├── create_event.py       # 标准化事件写入工具
+│   ├── health-check.sh       # 健康检查
+│   ├── baseline.sh           # 基线快照 & Diff 对比
+│   └── fix_nonstandard_types.py   # 历史数据修复：type 标准化
+│   └── fix_recent_events_tags.py  # 历史数据修复：tag -> tags 字段名
+└── .sys/                     # 运行时目录（gitignore）
+    ├── logs/events.jsonl     # 结构化事件日志
+    ├── sessions/             # 每日会话摘要
+    ├── baseline/             # 基线快照
+    ├── todo/
+    └── compact/
+```
 
-workspace/memory/project.md
+---
 
-workspace/memory/recent.md
+## 核心脚本说明
 
-workspace/memory/errors.md
+### `scripts/evolve.py`
+每天 00:00 由 cron 自动运行，读取近 7 天 `events.jsonl`，提取洞察并更新 `memory/recent.md` 和 `memory/errors.md`。
 
-配置 OpenClaw
-在 OpenClaw 中，将 workspace 路径设置为安装目标路径，例如：
+```bash
+# 手动运行
+python3 workspace/scripts/evolve.py
 
-text
-~/.openclaw/workspace
-位置：
-OpenClaw → Settings → Workspace → Custom Path
+# 搜索历史事件
+python3 workspace/scripts/evolve.py search "关键词"
+```
 
-首次激活：对话提示词
-安装完成后，新建一个 OpenClaw 对话，粘贴下面这段提示词：
+### `scripts/create_event.py`
+标准化事件写入工具，自动验证 type 合法性、content 字数、tags 非空，强制 UTC 时区。  
+在 `session-notes` 中推荐优先使用此工具写入事件。
 
-text
-请读取以下文件完成初始化：
-IDENTITY.md、AGENTS.md、memory/core.md、
-memory/project.md、memory/recent.md、memory/errors.md
-以及 skills/ 下所有文件。
+```bash
+# 写入一条事件
+python3 workspace/scripts/create_event.py \
+  --type learning-achievement \
+  --content "今天学习了..."
 
-读取完成后，请依次问我以下问题：
+# 查看所有合法 type
+python3 workspace/scripts/create_event.py --list-types
 
-[关于你]
-1. 给你起个名字 — 你想叫什么？
-2. 你的性格风格 — 直接/温和/幽默/严谨，或自由描述
-3. 有什么口头禅或特别习惯吗？（没有可跳过）
+# 验证某个 type 是否合法
+python3 workspace/scripts/create_event.py --check-type task-done
+```
 
-[关于我]
-4. 叫我什么，你在哪个时区？
-5. 你的工作场景和日常使用偏好是什么？
-6. 希望我重点协助哪些方面？
+### `scripts/fix_nonstandard_types.py`
+历史数据修复工具，将 `events.jsonl` 中非标准 type 批量替换为最近的标准类型。
 
-收集完以上信息后，请：
-- 将助手设定写入 IDENTITY.md
-- 将用户信息写入 memory/core.md
-- 执行 /remember 和 /session-notes
+### `scripts/fix_recent_events_tags.py`
+历史数据修复工具，将旧数据中 `"tag"` 字段名批量重命名为 `"tags"`。
 
-完成后请立即创建 2 个定时任务（使用 OpenClaw 自己的定时能力）：
-1. 每天 00:00 执行 /memory-evolution
-2. 每周一 09:00 执行 /weekly-self-reflection
+---
 
-定时任务创建完成后：
-- 告诉我你创建了哪些任务，下一次触发时间
-- 做一个简短的自我介绍，确认全部初始化完成
-你也可以直接把 setup.sh 文件拖给 OpenClaw，让它先理解脚本，再按里面的步骤执行和自检。
+## 事件规范（events.jsonl）
 
-日常使用：常用指令
-指令	作用	触发时机
-/remember	将当前对话要点写入记忆	重要对话后手动执行
-/session-notes	会话日志 + events.jsonl + 错误记录	检测到告别语时自动执行
-/memory-evolution	整理最近 7 天事件，更新进化摘要和错误晋升	每日 00:00（定时）
-/weekly-self-reflection	生成量化周报，列出 Skill 候选	每周一 09:00（定时）
-/compact	压缩上下文，避免 context 爆掉	对话太长时手动触发
-/todo	管理待办列表	任意时刻
-/health-check	检查路径、权限、JSON 合法性等	怀疑系统异常时
-命令行工具示例
-bash
-# 健康检查
-WORKSPACE=~/.openclaw/workspace \
-  bash ~/.openclaw/workspace/scripts/health-check.sh
+每条事件必须符合以下格式，否则 `evolve.py` 和 `health-check.sh` 会报错：
 
-# 搜索历史事件（跨会话记忆检索）
-python3 ~/.openclaw/workspace/scripts/evolve.py search "关键词"
+```json
+{
+  "ts":      "2026-03-15T00:00:00+00:00",
+  "type":    "<标准类型>",
+  "content": "<详细描述>",
+  "tags":    ["tag1", "tag2"],
+  "count":   1
+}
+```
 
-# 手动触发进化（等价于每日 00:00 的定时任务）
-python3 ~/.openclaw/workspace/scripts/evolve.py
+**强制要求：**
+- `tags` 字段名（不是 `tag`）
+- `ts` 必须带 UTC 时区偏移（`+00:00`）
+- `type` 必须从以下 14 个标准类型中选取
 
-# 生成 baseline 快照并查看
-WORKSPACE=~/.openclaw/workspace \
-  bash ~/.openclaw/workspace/scripts/baseline.sh
+**14 个标准 type：**
 
-# 查看最近 20 条事件（格式化）
-tail -20 ~/.openclaw/workspace/.sys/logs/events.jsonl \
-  | python3 -m json.tool
+| type | 说明 | 内容最低字数 |
+|---|---|---|
+| `task-done` | 完成任务 | 8 单元 |
+| `error-found` | 发现错误 | 8 单元 |
+| `system-improvement` | 系统改进 | 10 单元 |
+| `learning-achievement` | 学习成就 | 15 单元 |
+| `user-correction` | 用户纠正 | 10 单元 |
+| `automation-deployment` | 自动化部署 | 5 单元 |
+| `error-fix` | 错误修复 | 5 单元 |
+| `system-monitoring` | 系统监控 | 5 单元 |
+| `quality-verification` | 质量验证 | 5 单元 |
+| `new-capability` | 新能力（兼容旧数据） | 5 单元 |
+| `automation-planning` | 自动化规划 | 5 单元 |
+| `memory-compaction` | 内存压缩 | 5 单元 |
+| `pua-inspection` | 深度检查 | 5 单元 |
+| `quality-improvement` | 质量改进 | 5 单元 |
 
-# 简单备份当前 workspace
-cp -r ~/.openclaw/workspace ~/openclaw-backup-$(date +%Y%m%d)
-系统工作原理（简版）
-text
-每次对话
-  └─ 用户说“再见 / 结束 / bye”……
-       └─ /session-notes 自动静默执行
-            ├─ 写 .sys/sessions/YYYY-MM-DD.md
-            ├─ 追加 .sys/logs/events.jsonl（结构化事件）
-            └─ 有失误时更新 memory/errors.md
+> 中文内容字数单元：每 15 个字符 ≈ 1 单元；英文按单词数计算。
 
-每天 00:00
-  └─ /memory-evolution
-       └─ scripts/evolve.py
-            ├─ 自动检测 .sys/ 或 .openclaw/ 作为运行时目录
-            ├─ 统计错误和能力变化
-            ├─ 高频错误 → errors.md 标记 pending
-            └─ 更新 memory/recent.md 中的“进化摘要”
+---
 
-每周一 09:00
-  └─ /weekly-self-reflection
-       ├─ 统计最近 7 天 sessions + events.jsonl
-       ├─ 输出量化数据（纠错次数、新能力、错误情况）
-       └─ 将周报追加写入 memory/project.md
-版本记录
-版本	说明
-v3.0	初版自进化框架：结构化 events.jsonl、错误晋升、周报模板
-v3.1	统一使用 .sys/ 运行时目录（兼容旧版本 .openclaw/）、清理路径问题、简化为 workspace/ + setup.sh 的 git 友好结构
+## 定时任务
+
+`setup.sh` 会自动注册以下两条 crontab：
+
+| 任务 | 时间 | 说明 |
+|---|---|---|
+| `evolve.py` | 每天 00:00 | 记忆进化，更新 recent.md / errors.md |
+| weekly trigger | 每周一 09:00 | 写入触发信号，启动时自动执行 /weekly-self-reflection |
+
+手动查看：
+```bash
+crontab -l | grep -E "memory-evolution|weekly-self-reflection"
+```
+
+---
+
+## 健康检查
+
+```bash
+bash workspace/scripts/health-check.sh
+```
+
+检查项包括：workspace 可写、events.jsonl JSON 合法、磁盘空间、关键文件存在、Python 脚本语法、**近 20 条事件的 tags 覆盖率**。
+
+---
+
+## 历史数据修复
+
+如果你是从旧版本升级，建议先运行修复脚本：
+
+```bash
+# 修复 tag -> tags 字段名
+python3 workspace/scripts/fix_recent_events_tags.py
+
+# 修复非标准 type
+python3 workspace/scripts/fix_nonstandard_types.py
+```
+
+---
+
+## 版本历史
+
+| 版本 | 主要改动 |
+|---|---|
+| v3.1 | 初始完整方案 |
+| v3.2 | 修复激活提示词视角问题（关于我/关于你） |
+| v3.3 | 修复 evolve.py 时区 bug（naive/aware datetime 混用） |
+| v3.4 | 修复 evolve.py 3个字段一致性 bug（tags字段名兼容、capabilities类型、corrections字段读取）；新增 promoted 错误过滤；新增 create_event.py 标准事件写入工具；session-notes.md / AGENTS.md 补充强制写入规范；setup.sh 修复 crontab tag->tags 并补充 create_event.py chmod |
+
+---
+
+## 文件对应关系
+
+部分脚本名称与方案文档中的描述名称对应如下：
+
+| 方案文档名称 | 实际文件名 |
+|---|---|
+| `tags_fixer.py` | `fix_recent_events_tags.py` |
+| `type_normalizer.py` | `fix_nonstandard_types.py` |
+
+---
+
+## License
+
+MIT
