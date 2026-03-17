@@ -2,42 +2,47 @@
 
 每次会话结束时自动静默执行（由 AGENTS.md 自动规则触发）。
 
-## 执行步骤
+## ⚠️ 重要：这是真实执行，不是描述
 
-1. 将本次会话摘要写入：
-   ~/.openclaw/workspace/.sys/sessions/YYYY-MM-DD.md
+`/session-notes` 必须通过 `session_note_writer.py` 脚本真正写入文件，
+不能只是在对话中"描述"要做什么。
 
-2. 将结构化事件追加到 events.jsonl：
-   ~/.openclaw/workspace/.sys/logs/events.jsonl
+## 标准执行命令
 
-   强制规范（必须遵守）：
-   - 字段名用 tags（不是 tag）
-   - ts 必须带 UTC 时区（+00:00）
-   - type 必须从以下 14 个标准类型中选，不可自造
-   - content 字数须达到对应类型的最低要求
-   - tags 至少 1 个
+```
+exec: python3 ~/.openclaw/workspace/scripts/session_note_writer.py \
+  --summary   "本次会话摘要（自然语言）" \
+  --type      task-done \
+  --content   "完成的具体内容，中文不少于120字符" \
+  --tags      task-completion,progress \
+  --error     "发现的错误（无则省略此行）"
+```
 
-   推荐写法（使用 create_event.py，自动保证所有质量标准）：
-   exec: python3 ~/.openclaw/workspace/scripts/create_event.py \
-     --type learning-achievement \
-     --content "详细描述学习内容、过程、收获和应用场景..."
+## 脚本完成的4个步骤
 
-   14个标准 type：
-   task-done / error-found / system-improvement / learning-achievement /
-   user-correction / automation-deployment / error-fix / system-monitoring /
-   quality-verification / new-capability / automation-planning /
-   memory-compaction / pua-inspection / quality-improvement
+1. **写会话日志** → `.sys/sessions/YYYY-MM-DD.md` + `.openclaw/sessions/YYYY-MM-DD.md`（双路径）
+2. **追加结构化事件** → `.sys/logs/events.jsonl`（自动探测路径）
+3. **更新 errors.md** → 有错误时自动新增或累计次数
+4. **触发 /remember** → 在 `memory/recent.md` 写入时间戳标记
 
-   内容最低字数（中文每15字符约1单元）：
-   - learning-achievement: >= 15 单元
-   - user-correction / system-improvement: >= 10 单元
-   - task-done / error-found: >= 8 单元
-   - 其他类型: >= 5 单元
+## 告别词自动触发方式
 
-3. 若本次会话有明显失误：
-   - 检查 memory/errors.md 是否有同类条目
-   - 有 -> 更新出现次数 +1，若 >= 2 次改状态为 pending
-   - 无 -> 新增条目，状态为 monitoring
-   - 不重复新增同类错误，只累计次数
+```
+exec: python3 ~/.openclaw/workspace/scripts/farewell_detector.py \
+  --text "<用户最后说的话>" \
+  --auto-trigger \
+  --summary "..." \
+  --type task-done \
+  --content "..."
+```
 
-4. 执行 /remember，更新 memory/recent.md 和 memory/project.md
+## type 选择参考
+
+| 本次会话主要内容 | 推荐 type |
+|---|---|
+| 完成了任务/功能 | task-done |
+| 发现了 bug / 问题 | error-found |
+| 修复了 bug | error-fix |
+| 学习了新知识 | learning-achievement |
+| 用户纠正了 AI | user-correction |
+| 系统配置改进 | system-improvement |
