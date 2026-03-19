@@ -81,6 +81,7 @@ SCRIPTS=(
     session_note_writer.py
     fix_recent_events_tags.py
     fix_nonstandard_types.py
+    weekly_reflection.py
 )
 
 for s in "${SCRIPTS[@]}"; do
@@ -161,19 +162,9 @@ echo "# 记忆进化（每天 00:00）"
 echo "0 0 * * * python3 \$WORKSPACE/scripts/evolve.py >> \$WORKSPACE/.sys/logs/cron-memory-evolution.log 2>&1"
 echo ""
 echo "# 周反思（每周一 09:00）"
-echo "# ⚠️  weekly-self-reflection 是 OpenClaw skill。"
-echo "# isolated session 不加载 workspace/skills/，不能用斜杠命令触发。"
-echo "# 正确做法：在 OpenClaw 原生 cron 里配置以下 payload（不是系统 crontab）："
-echo "#"
-echo "# payload:"
-echo "#   请读取文件 \$WORKSPACE/skills/weekly-self-reflection.md，"
-echo "#   然后严格按照文件中定义的步骤执行 weekly-self-reflection 任务。"
-echo "#   - 路径用绝对路径"
-echo "#   - 群消息摘要不超过200字"
-echo "#   - 完整周报写入 \$WORKSPACE/memory/project.md"
-echo "#"
-echo "# schedule: 0 9 * * 1（每周一 09:00）"
-echo "# sessionTarget: isolated"
+echo "# weekly_reflection.py 独立脚本，不依赖 OpenClaw skill / payload"
+echo "# 直接读取 events.jsonl + memory/ 生成周报，写入 memory/project.md"
+echo "0 9 * * 1 python3 \$WORKSPACE/scripts/weekly_reflection.py >> \$WORKSPACE/.sys/logs/weekly-reflection.log 2>&1"
 echo ""
 echo "手动注册方法：crontab -e，粘贴上方两行（去掉 echo 和引号）"
 EOF
