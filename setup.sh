@@ -122,7 +122,7 @@ chmod +x "$WORKSPACE/scripts/"*.sh 2>/dev/null || true
 chmod +x "$WORKSPACE/scripts/"*.py 2>/dev/null || true
 
 # ════════════════════════════════════════════════════════════
-# 6. 清理 v3.6 遗留的系统 crontab 条目（如有）
+# 5. 清理 v3.6 遗留的系统 crontab 条目（如有）
 #    v3.7 起统一使用 OpenClaw 原生 cron，不注册系统 crontab
 # ════════════════════════════════════════════════════════════
 EXISTING=$(crontab -l 2>/dev/null | grep -E "memory-evolution|weekly-self-reflection" || true)
@@ -131,6 +131,43 @@ if [ -n "$EXISTING" ]; then
     crontab -l 2>/dev/null | grep -v "memory-evolution\|weekly-self-reflection" | crontab -
     log "系统 crontab 旧条目已清理 ✅"
 fi
+
+# ════════════════════════════════════════════════════════════
+# 6. 生成 install-cron.sh（参考文件，不自动注册）
+#    v3.7：OpenClaw 原生 cron 统一管理，此文件仅供查阅
+# ════════════════════════════════════════════════════════════
+log "生成 install-cron.sh 参考文件..."
+
+INSTALL_CRON="$WORKSPACE/scripts/install-cron.sh"
+cat > "$INSTALL_CRON" << 'EOF'
+#!/bin/bash
+# ============================================================
+# install-cron.sh — OpenClaw cron 参考配置
+# 由 setup.sh v3.7 自动生成
+#
+# v3.7 起建议在 OpenClaw 应用内使用原生 cron 管理定时任务。
+# 如需手动注册系统 crontab，参考下方说明。
+# ============================================================
+EOF
+
+# 追加含变量展开的部分（单独写，避免 heredoc 变量转义问题）
+cat >> "$INSTALL_CRON" << EOF
+
+WORKSPACE="$WORKSPACE"
+
+echo "=== OpenClaw 推荐 cron 配置（供参考）==="
+echo ""
+echo "# 记忆进化（每天 00:00）"
+echo "0 0 * * * python3 \$WORKSPACE/scripts/evolve.py >> \$WORKSPACE/.sys/logs/cron-memory-evolution.log 2>&1"
+echo ""
+echo "# 周反思（每周一 09:00，调用真实脚本）"
+echo "0 9 * * 1 \$WORKSPACE/scripts/weekly_reflection.sh >> \$WORKSPACE/.sys/logs/weekly-reflection.log 2>&1"
+echo ""
+echo "手动注册方法：crontab -e，粘贴上方两行（去掉 echo 和引号）"
+EOF
+
+chmod +x "$INSTALL_CRON"
+log "install-cron.sh 已生成：$INSTALL_CRON"
 
 # ════════════════════════════════════════════════════════════
 # 7. 健康检查（10 项核心检查）
