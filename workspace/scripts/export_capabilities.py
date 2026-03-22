@@ -20,7 +20,7 @@ def main():
         print("❌ capabilities.json 不存在")
         return
 
-    data = safe_read_json(CAPABILITIES_JSON)
+    data         = safe_read_json(CAPABILITIES_JSON)
     capabilities = data.get("capabilities", [])
 
     exportable = [
@@ -29,8 +29,8 @@ def main():
     ]
 
     output = {
-        "exported_at": datetime.now(CST).isoformat(),
-        "count": len(exportable),
+        "exported_at":  datetime.now(CST).isoformat(),
+        "count":        len(exportable),
         "capabilities": exportable
     }
 
@@ -40,7 +40,7 @@ def main():
 
     print(f"✅ 导出完成：{len(exportable)} 个 strong_verified 能力 → {out_path}")
     for cap in exportable:
-        print(f"  [{cap['capability_id']}] {cap.get('display_name','')} | 复用：{cap.get('reuse_count',0)} | 最近：{cap.get('last_used','')}")
+        print(f"  [{cap['capability_id']}] {cap.get('display_name', '')} | 复用：{cap.get('reuse_count', 0)} | 最近：{cap.get('last_used', '')}")
 
 
 if __name__ == "__main__":

@@ -22,15 +22,16 @@ def main():
     chain        = safe_read_jsonl(EVOLUTION_CHAIN)
     capabilities = safe_read_json(CAPABILITIES_JSON).get("capabilities", []) if os.path.exists(CAPABILITIES_JSON) else []
     antipatterns = safe_read_json(ANTIPATTERNS_JSON).get("antipatterns", []) if os.path.exists(ANTIPATTERNS_JSON) else []
-    goals        = safe_read_json(GOALS_JSON) if os.path.exists(GOALS_JSON) else {}
+    goals        = safe_read_json(GOALS_JSON)        if os.path.exists(GOALS_JSON)        else {}
     index        = safe_read_json(INTELLIGENCE_INDEX) if os.path.exists(INTELLIGENCE_INDEX) else {}
 
-    today = date.today()
+    today  = date.today()
     window = 7
 
-    recent_failures = 0
-    recent_reworks  = 0
+    recent_failures  = 0
+    recent_reworks   = 0
     recent_challenges = 0
+
     for e in chain:
         ts = e.get("ts", "")[:10]
         try:
@@ -64,26 +65,26 @@ def main():
     for dim in ["IQ", "EQ", "FQ"]:
         current = index.get(dim, {}).get("score", 50.0)
         target  = result_goals.get(dim, {}).get("target_6m", 70.0)
-        gap = round(target - current, 2)
+        gap     = round(target - current, 2)
         if gap > 0:
-            gap_parts.append(f"{dim}差距{gap}")
+            gap_parts.append(f"{dim} 差距 {gap}")
 
     digest = {
-        "updated_at": datetime.now(CST).isoformat(),
-        "top_capabilities": [c["capability_id"] for c in top_caps],
+        "updated_at":        datetime.now(CST).isoformat(),
+        "top_capabilities":  [c["capability_id"] for c in top_caps],
         "active_antipatterns": [ap["antipattern_id"] for ap in active_aps],
         "recent_failures":   recent_failures,
         "recent_reworks":    recent_reworks,
         "recent_challenges": recent_challenges,
-        "current_focus":     gap_parts[0].replace("差距", " 差距最大，需关注") if gap_parts else "均衡发展",
+        "current_focus":     (gap_parts[0] + " 差距最大，需关注") if gap_parts else "均衡发展",
         "goal_gap_summary":  "，".join(gap_parts) if gap_parts else "已达目标",
         "index_snapshot":    {dim: index.get(dim, {}).get("score", 50.0) for dim in ["IQ", "EQ", "FQ"]}
     }
 
     safe_write_json(RECENT_DIGEST, digest)
     print(f"[digest] 更新完成：{RECENT_DIGEST}")
-    print(f"  top_caps: {digest['top_capabilities']}")
-    print(f"  gap: {digest['goal_gap_summary']}")
+    print(f"  top_caps : {digest['top_capabilities']}")
+    print(f"  gap      : {digest['goal_gap_summary']}")
 
 
 if __name__ == "__main__":

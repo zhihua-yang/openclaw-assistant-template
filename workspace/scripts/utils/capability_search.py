@@ -1,8 +1,13 @@
+#!/usr/bin/env python3
+"""
+capability_search.py — 三级降级检索
+精确匹配 → 本地 TF-IDF → 空列表，不调用任何外部 API
+"""
+
+
 def get_related_capabilities(event: dict, capabilities: list, max_n: int = 3) -> list:
-    """
-    三级降级检索：精确匹配 → 本地 TF-IDF → 空列表
-    任何情况下都不调用 LLM 或 Embedding API
-    """
+    """三级降级检索：精确匹配 → 本地 TF-IDF → 空列表"""
+
     # 级别 1：精确匹配 capability_ids
     if event.get("capability_ids"):
         exact = [
@@ -48,9 +53,9 @@ def get_related_capabilities(event: dict, capabilities: list, max_n: int = 3) ->
 
 
 def get_related_antipatterns(event: dict, antipatterns: list, max_n: int = 3) -> list:
-    """
-    同样的三级降级逻辑，用于检索相关 antipattern
-    """
+    """同样的三级降级逻辑，用于检索相关 antipattern"""
+
+    # 级别 1：精确匹配
     if event.get("antipattern_ids"):
         exact = [
             ap for ap in antipatterns
@@ -59,6 +64,7 @@ def get_related_antipatterns(event: dict, antipatterns: list, max_n: int = 3) ->
         if exact:
             return exact[:max_n]
 
+    # 级别 2：本地 TF-IDF
     query = " ".join(filter(None, [
         event.get("title", ""),
         event.get("content", ""),
@@ -89,4 +95,5 @@ def get_related_antipatterns(event: dict, antipatterns: list, max_n: int = 3) ->
         except Exception:
             pass
 
+    # 级别 3：返回空列表
     return []
