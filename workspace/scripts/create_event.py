@@ -119,17 +119,18 @@ def build_event(args, profile) -> dict:
     evidence = args.evidence or profile.get("evidence_default", "self")
 
     event = {
-        "id":            event_id,
-        "type":          args.type,
-        "date":          TODAY,
-        "created_at":    NOW_TS,
-        "task_id":       task_id,
-        "content":       args.content,
+        "event_id":       event_id,              # ← 改：id → event_id
+        "ts":             NOW_TS,                # ← 改：created_at → ts
+        "source_type":    "derived" if args.type in DERIVED_TYPES else "fact",
+        "event_type":     args.type,             # ← 改：type → event_type
+        "date":           TODAY,
+        "task_id":        task_id,
+        "content":        args.content,
         "evidence_level": evidence,
-        "event_class":   "derived" if args.type in DERIVED_TYPES else "fact",
+        "is_primary_scoring_event": True,
     }
+    # … 其余可选字段不变
 
-    # 可选字段（有值才写入，保持 JSON 干净）
     if args.task_type:
         event["task_type"] = args.task_type
     if args.difficulty:
