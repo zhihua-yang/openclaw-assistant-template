@@ -1,272 +1,348 @@
 #!/usr/bin/env python3
 """
-evolve.py v3.7
-- v3.5: 路径统一 .sys/logs/events.jsonl
-- v3.6: 新增 update_growth_md()，error-found 纳入高频统计
-- v3.7: BASE 改用 Path(__file__).parent.parent 动态推导（支持自定义 workspace 路径）
+evolve.py — 计分引擎
+每日 00:20 由 Cron 触发，处理 evolution_chain 中未处理的事件
 """
-
-import json
-import re
+import os
 import sys
-from pathlib import Path
-from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone, timedelta
 
-# 动态推导 workspace 根目录（v3.7：支持任意安装路径）
-# __file__ = workspace/scripts/evolve.py
-# parent   = workspace/scripts/
-# parent.parent = workspace/
-BASE = Path(__file__).parent.parent
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-MEM  = BASE / 'memory' / 'recent.md'
-ERRS = BASE / 'memory' / 'errors.md'
-GROW = BASE / 'memory' / 'growth.md'
-LOGS = BASE / '.sys' / 'logs' / 'events.jsonl'
+from utils import safe_read_json, safe_write_json, safe_read_jsonl, safe_append_jsonl
+from utils.paths import (
+    EVOLUTION_CHAIN, INTELLIGENCE_INDEX, CAPABILITIES_JSON,
+    AUDIT_QUEUE, PROFILE_JSON, RECENT_DIGEST
+)
 
-# 初始化必要目录
-LOGS.parent.mkdir(parents=True, exist_ok=True)
-for d in ['sessions', 'baseline', 'todo', 'compact']:
-    (BASE / '.sys' / d).mkdir(parents=True, exist_ok=True)
-(BASE / 'memory' / 'archive').mkdir(parents=True, exist_ok=True)
+CST = timezone(timedelta(hours=8))
+
+EVIDENCE_COEFFICIENTS = {"external": 1.0, "logical": 0.7, "self": 0.2}
+
+BASE_DELTAS = {
+    "task-done-new":                    {"IQ": 0.2,  "EQ": 0.0, "FQ": 0.2},
+    "task-done-routine":                {"IQ": 0.0,  "EQ": 0.0, "FQ": 0.1},
+    "error-fix":                        {"IQ": 0.3,  "EQ": 0.0, "FQ": 0.0},
+    "system-improvement":               {"IQ": 0.1,  "EQ": 0.0, "FQ": 0.2},
+    "user-positive-feedback":           {"IQ": 0.0,  "EQ": 0.2, "FQ": 0.1},
+    "user-correction":                  {"IQ": -0.1, "EQ": -0.3, "FQ": -0.1},
+    "task-rework":                      {"IQ": 0.0,  "EQ": -0.1, "FQ": -0.3},
+    "intentional-challenge-success":    {"IQ": 0.2,  "EQ": 0.0, "FQ": 0.0},
+    "intentional-challenge-partial":    {"IQ": 0.1,  "EQ": 0.0, "FQ": 0.0},
+    "intentional-challenge-fail":       {"IQ": 0.0,  "EQ": 0.0, "FQ": 0.0},
+    "learning-achievement-normal":      {"IQ": 0.1,  "EQ": 0.0, "FQ": 0.0},
+    "learning-achievement-error":       {"IQ": 0.15, "EQ": 0.0, "FQ": 0.0},
+    "learning-achievement-challenge":   {"IQ": 0.12, "EQ": 0.0, "FQ": 0.0},
+    "capability-reuse-near":            {"IQ": 0.1,  "EQ": 0.0, "FQ": 0.1},
+    "capability-reuse-far":             {"IQ": 0.12, "EQ": 0.0, "FQ": 0.05},
+    "reputation-recovered":             {"IQ": 0.1,  "EQ": 0.1, "FQ": 0.0},
+    "capability-decay-penalty":         {"IQ": -0.1, "EQ": 0.0, "FQ": -0.1},
+}
+
+NEGATIVE_EVENTS = {"user-correction", "task-rework", "error-found",
+                   "capability-decay-penalty"}
+NO_RESISTANCE_EVENTS = NEGATIVE_EVENTS
+
+CHAIN_MAX_POSITIVE = 0.6
+CHAIN_MAX_NEGATIVE = -0.6
+DERIVED_MAX_RATIO  = 0.5
+DAILY_FQ_CAP       = 2
 
 
-def load_recent_events(days=7):
-    events = []
-    now_naive_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-    cutoff = now_naive_utc - timedelta(days=days)
-    if not LOGS.exists():
-        return events
-    for line in LOGS.read_text().splitlines():
-        line = line.strip()
-        if not line:
+def load_profile() -> dict:
+    if os.path.exists(PROFILE_JSON):
+        return safe_read_json(PROFILE_JSON)
+    return {}
+
+
+def resistance_factor(current_score: float) -> float:
+    return max(0.1, (100 - current_score) / 50)
+
+
+def get_base_delta_key(event: dict) -> str:
+    etype = event.get("event_type", "")
+
+    if etype == "task-done":
+        return "task-done-new" if event.get("is_first_of_type") else "task-done-routine"
+
+    if etype == "intentional-challenge":
+        outcome = event.get("outcome", "fail")
+        return f"intentional-challenge-{outcome}"
+
+    if etype == "learning-achievement":
+        trigger = event.get("learning_trigger", "normal")
+        if trigger == "error-driven":
+            return "learning-achievement-error"
+        if trigger == "challenge-driven":
+            return "learning-achievement-challenge"
+        return "learning-achievement-normal"
+
+    if etype == "capability-reuse":
+        transfer = event.get("transfer_type", "near")
+        return f"capability-reuse-{transfer}"
+
+    return etype
+
+
+def compute_delta(event: dict, index: dict) -> dict:
+    key = get_base_delta_key(event)
+    base = BASE_DELTAS.get(key, {"IQ": 0.0, "EQ": 0.0, "FQ": 0.0})
+    evidence = event.get("evidence_level", "self")
+    coef = EVIDENCE_COEFFICIENTS.get(evidence, 0.2)
+    etype = event.get("event_type", "")
+
+    result = {}
+    for dim in ["IQ", "EQ", "FQ"]:
+        bd = base.get(dim, 0.0)
+        if bd == 0.0:
+            result[dim] = 0.0
             continue
-        try:
-            e = json.loads(line)
-            if 'ts' not in e:
-                continue
-            event_dt = datetime.fromisoformat(e['ts'])
-            naive_utc = event_dt.astimezone(timezone.utc).replace(tzinfo=None) if event_dt.tzinfo else event_dt
-            if naive_utc >= cutoff:
-                events.append(e)
-        except (json.JSONDecodeError, ValueError, KeyError):
-            pass
-    return events
+        if bd > 0 and etype not in NO_RESISTANCE_EVENTS:
+            rf = resistance_factor(index.get(dim, {}).get("score", 50.0))
+        else:
+            rf = 1.0
+        # self 证据只进 EQ_process，不直接改 IQ/FQ
+        if evidence == "self" and dim in ("IQ", "FQ"):
+            result[dim] = 0.0
+        else:
+            result[dim] = round(bd * coef * rf, 4)
+
+    return result
 
 
-def search_memory(keyword: str, topn: int = 5):
-    results = []
-    if not LOGS.exists():
-        return results
-    kw = keyword.lower()
-    for line in LOGS.read_text().splitlines():
-        line = line.strip()
-        if not line or kw not in line.lower():
+def get_task_done_count_today(chain: list, task_type: str, today_str: str) -> int:
+    count = 0
+    for record in chain:
+        if (record.get("event_type") == "task-done"
+                and record.get("task_type") == task_type
+                and record.get("ts", "").startswith(today_str)
+                and record.get("processed", False)):
+            count += 1
+    return count
+
+
+def get_penalty_balance(chain: list, capability_id: str) -> float:
+    """计算当前修复周期内该能力的待补平净扣分"""
+    negative_total = 0.0
+    recovered_total = 0.0
+    in_cycle = False
+
+    for record in chain:
+        etype = record.get("event_type", "")
+        caps = record.get("capability_ids", [])
+        if capability_id not in caps:
             continue
-        try:
-            results.append(json.loads(line))
-        except Exception:
-            pass
-    results.sort(key=lambda x: (x.get('count', 1), x.get('ts', '')), reverse=True)
-    return results[:topn]
+        if etype in {"error-found", "task-rework", "user-correction"}:
+            negative_total += abs(record.get("actual_delta", {}).get("IQ", 0.0))
+            in_cycle = True
+        elif etype == "reputation-recovered" and in_cycle:
+            recovered_total += record.get("actual_delta", {}).get("IQ", 0.0)
+
+    return max(0.0, negative_total - recovered_total)
 
 
-def extract_insights(events: list) -> dict:
-    corrections  = [e for e in events if e.get('type') == 'user-correction']
-    errors       = [e for e in events if e.get('type') in ('repeated-error', 'user-correction', 'bug-analysis', 'error-found')]
-    capabilities = [e for e in events if e.get('type') in ('new-capability', 'learning-achievement')]
-    preferences  = [e for e in events if e.get('type') == 'preference']
-
-    error_counts = Counter()
-    for e in errors:
-        key = e.get('content', '')[:80]
-        error_counts[key] += e.get('count', 1)
-    frequent_errors = [e for e, c in error_counts.items() if c >= 2]
-
-    all_tags = []
-    for e in events:
-        all_tags.extend(e.get('tags', e.get('tag', [])))
-    tag_summary = Counter(all_tags).most_common(5)
-
-    return {
-        'corrections':      corrections,
-        'frequent_errors':  frequent_errors,
-        'new_capabilities': [e.get('content', '') for e in capabilities],
-        'preferences':      [e.get('content', '') for e in preferences],
-        'total_events':     len(events),
-        'tag_summary':      tag_summary,
-        'raw_capabilities': capabilities,
-    }
+def is_first_task_type(chain: list, task_type: str) -> bool:
+    for record in chain:
+        if (record.get("event_type") == "task-done"
+                and record.get("task_type") == task_type
+                and record.get("processed", False)):
+            return False
+    return True
 
 
-def get_already_promoted_errors() -> list:
-    if not ERRS.exists():
-        return []
-    content = ERRS.read_text()
-    promoted_errors = []
-    lines = content.split('\n')
-    current_error = None
-    for line in lines:
-        if line.startswith('##') and '|' in line:
-            current_error = line.split('|')[1][:80]
-        elif current_error and '|' in line and 'promoted' in line:
-            promoted_errors.append(current_error)
-            current_error = None
-    return promoted_errors
+def update_capability_status(capabilities: list, event: dict) -> list:
+    etype = event.get("event_type", "")
+    caps_in_event = event.get("capability_ids", [])
+
+    for cap in capabilities:
+        if cap["capability_id"] not in caps_in_event:
+            continue
+
+        if etype == "learning-achievement":
+            if cap.get("status") == "observed":
+                cap["status"] = "declared"
+
+        elif etype == "capability-reuse":
+            cap["reuse_count"] = cap.get("reuse_count", 0) + 1
+            if event.get("transfer_type") == "far":
+                cap["far_transfer_count"] = cap.get("far_transfer_count", 0) + 1
+            else:
+                cap["near_transfer_count"] = cap.get("near_transfer_count", 0) + 1
+
+            near = cap.get("near_transfer_count", 0)
+            far  = cap.get("far_transfer_count", 0)
+            total = cap.get("reuse_count", 0)
+
+            if cap.get("status") == "declared" and total >= 1:
+                cap["status"] = "standard_verified"
+            if cap.get("status") == "standard_verified" and total >= 3 and near >= 2 and far >= 1:
+                cap["status"] = "strong_verified"
+
+            cap["last_used"] = event.get("ts", "")[:10]
+
+    return capabilities
 
 
-def update_memory(insights: dict):
-    if not MEM.exists():
-        MEM.parent.mkdir(parents=True, exist_ok=True)
-        MEM.write_text('# Recent Memory\n')
-    content = MEM.read_text()
-    ts    = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')
-    total = insights['total_events']
-    tag_line       = ', '.join(f'{t}×{c}' for t, c in insights['tag_summary']) or '-'
-    corrections_text = '\n'.join(
-        f'- {c.get("content", c.get("old","?"))[:80]} → {c.get("new","?")}' for c in insights['corrections']
-    ) or '-'
-    promoted_errors = get_already_promoted_errors()
-    filtered_errors = [
-        err for err in insights['frequent_errors']
-        if not any(pe in err[:80] or err[:80] in pe for pe in promoted_errors)
-    ]
-    errors_text = '\n'.join(f'- {e}' for e in filtered_errors) or '-'
-    caps_text   = '\n'.join(f'- {c[:100]}' for c in insights['new_capabilities']) or '-'
-    prefs_text  = '\n'.join(f'- {p}' for p in insights['preferences']) or '-'
+def process_events(unprocessed: list, all_chain: list,
+                   index: dict, capabilities: list, profile: dict) -> tuple:
+    today_str = datetime.now(CST).strftime("%Y-%m-%d")
+    daily_fq_counts = {}
+    processed_ids = set()
+    chain_deltas = {}
+    evo_nodes = []
 
-    section = (
-        f'\n## {ts} | 近7天 {total} 条事件\n'
-        f'**Tag摘要** - {tag_line}\n'
-        f'**用户纠正**\n{corrections_text}\n'
-        f'**高频错误**\n{errors_text}\n'  # 2次以上
-        f'**新能力**\n{caps_text}\n'
-        f'**偏好**\n{prefs_text}\n'
-    )
-    new_content = re.sub(r'\n## \d{4}-\d{2}-\d{2}.+?(?=\n## |\Z)', section, content, flags=re.DOTALL)
-    if new_content == content:
-        new_content = content + section
-    MEM.write_text(new_content)
-    print(f'[evolve] recent.md updated ({total} events), logs: {LOGS}')
+    for event in unprocessed:
+        etype = event.get("event_type", "")
+        source = event.get("source_type", "")
+        event_id = event.get("event_id", "")
 
+        if source == "diagnostic":
+            event["processed"] = True
+            processed_ids.add(event_id)
+            continue
 
-def update_errors_md(insights: dict):
-    if not insights['frequent_errors']:
-        return
-    if not ERRS.exists():
-        ERRS.write_text('# Error Log\n')
-    content = ERRS.read_text()
-    ts = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-    promoted_errors = get_already_promoted_errors()
-    errors_to_process = [
-        ec for ec in insights['frequent_errors']
-        if not any(pe in ec[:80] or ec[:80] in pe for pe in promoted_errors)
-    ]
-    if not errors_to_process:
-        return
-    for err_content in errors_to_process:
-        if err_content in content:
-            content = re.sub(
-                r'(- 出现次数：)(\d+)',
-                lambda m: f'{m.group(1)}{int(m.group(2)) + 1}',
-                content, count=1
-            )
-        else:
-            content += (
-                f'\n## {ts} | {err_content[:60]}\n'
-                f'- 来源：events.jsonl 自动检测\n'
-                f'- 原始内容：{err_content}\n'
-                f'- 正确处理：（待补充）\n'
-                f'- tag：auto-detected\n'
-                f'- 出现次数：2\n'
-                f'- 状态：pending\n'
-            )
-    ERRS.write_text(content)
-    print(f'[evolve] errors.md updated ({len(errors_to_process)} items)')
+        task_type = event.get("task_type", "general")
+        task_id   = event.get("task_id", event_id)
 
+        # 判断是否首次任务类型
+        if etype == "task-done":
+            event["is_first_of_type"] = is_first_task_type(all_chain, task_type)
 
-def update_growth_md(insights: dict):
-    """
-    v3.6 新增：将 new-capability / learning-achievement 事件追加到 growth.md
-    v3.7.2 修复两个 bug：
-      1. 去重用事件原始 ts 日期（而非今天日期），避免历史事件每次重复追加
-      2. 内容取首行不截断（split('\\n')[0]），避免换行破坏格式
-    """
-    if not insights.get('raw_capabilities'):
-        return
-    if not GROW.exists():
-        GROW.parent.mkdir(parents=True, exist_ok=True)
-        GROW.write_text(
-            '# Growth Log\n\n'
-            '_长期能力成长轨迹，由 evolve.py 自动追加_\n'
-            '_格式：`- [YYYY-MM-DD] [event-type] content`_\n\n'
-            '---\n\n'
-        )
-    content   = GROW.read_text()
-    new_lines = []
-    for e in insights['raw_capabilities']:
-        # ✅ Bug1 修复：用事件原始 ts 日期，不用今天日期
-        event_ts = e.get('ts', '')
-        try:
-            event_date = datetime.fromisoformat(event_ts).strftime('%Y-%m-%d')
-        except (ValueError, TypeError):
-            event_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        # FQ 日限
+        fq_capped = False
+        if etype == "task-done" and not event.get("is_first_of_type"):
+            cap_count = daily_fq_counts.get(task_type, 0)
+            cap_limit = profile.get("daily_fq_cap_per_task_type", DAILY_FQ_CAP)
+            if cap_count >= cap_limit:
+                fq_capped = True
+            else:
+                daily_fq_counts[task_type] = cap_count + 1
 
-        # ✅ Bug2 修复：取内容首行，不截断，不破坏格式
-        raw_content = e.get('content', '')
-        first_line  = raw_content.split('\n')[0].strip()
+        # reputation-recovered 封顶
+        rep_capped = False
+        actual_delta = compute_delta(event, index)
+        if etype == "reputation-recovered":
+            for cap_id in event.get("capability_ids", []):
+                balance = get_penalty_balance(all_chain, cap_id)
+                if balance <= 0:
+                    actual_delta = {"IQ": 0.0, "EQ": 0.0, "FQ": 0.0}
+                    rep_capped = True
+                else:
+                    for dim in ["IQ", "EQ"]:
+                        actual_delta[dim] = min(actual_delta[dim], balance)
+            
+        if fq_capped:
+            actual_delta["FQ"] = 0.0
 
-        entry = f'- [{event_date}] [{e.get("type","")}] {first_line}'
-        # 去重：检查事件原始日期+首行内容是否已存在
-        if entry not in content:
-            new_lines.append(entry)
-    if new_lines:
-        GROW.write_text(content + '\n'.join(new_lines) + '\n')
-        print(f'[evolve] growth.md updated ({len(new_lines)} entries)')
+        # 链级上限检查
+        chain_key = task_id
+        chain_sum = chain_deltas.get(chain_key, {"IQ": 0.0, "EQ": 0.0, "FQ": 0.0})
+        for dim in ["IQ", "EQ", "FQ"]:
+            new_sum = chain_sum[dim] + actual_delta[dim]
+            if new_sum > CHAIN_MAX_POSITIVE:
+                actual_delta[dim] = max(0.0, CHAIN_MAX_POSITIVE - chain_sum[dim])
+            elif new_sum < CHAIN_MAX_NEGATIVE:
+                actual_delta[dim] = min(0.0, CHAIN_MAX_NEGATIVE - chain_sum[dim])
+            chain_sum[dim] = chain_sum[dim] + actual_delta[dim]
+        chain_deltas[chain_key] = chain_sum
+
+        # 写入指数
+        index_before = {dim: index.get(dim, {}).get("score", 50.0) for dim in ["IQ", "EQ", "FQ"]}
+        for dim in ["IQ", "EQ", "FQ"]:
+            current = index.get(dim, {}).get("score", 50.0)
+            index[dim]["score"] = round(current + actual_delta.get(dim, 0.0), 4)
+
+        # 更新能力状态
+        capabilities = update_capability_status(capabilities, event)
+
+        # 记录 evo node
+        evo_node = {
+            "node_id": f"evo-{event_id}",
+            "ts": event.get("ts"),
+            "primary_event_id": event_id,
+            "base_event_type": etype,
+            "task_id": task_id,
+            "scoring_decision": {
+                "base_delta_key": get_base_delta_key(event),
+                "evidence_level": event.get("evidence_level", "self"),
+                "evidence_coefficient": EVIDENCE_COEFFICIENTS.get(event.get("evidence_level", "self"), 0.2),
+                "fq_capped": fq_capped,
+                "rep_capped": rep_capped,
+                "actual_delta": actual_delta
+            },
+            "index_before": index_before,
+            "index_after": {dim: index.get(dim, {}).get("score", 50.0) for dim in ["IQ", "EQ", "FQ"]},
+            "processed": True
+        }
+        evo_nodes.append(evo_node)
+        event["processed"] = True
+        event["actual_delta"] = actual_delta
+        processed_ids.add(event_id)
+
+    return index, capabilities, evo_nodes, processed_ids
 
 
-def archive_if_needed():
-    if not MEM.exists():
-        return
-    lines = MEM.read_text().splitlines()
-    if len(lines) > 300:
-        archive_path = BASE / f'memory/archive/{datetime.now(timezone.utc).strftime("%Y-%m")}.md'
-        archive_path.write_text('\n'.join(lines))
-        MEM.write_text('\n'.join(lines[-50:]))
-        print(f'[evolve] archived to {archive_path}')
-
-
-if __name__ == '__main__':
-    print(f'[evolve] using logs: {LOGS}')
-    if len(sys.argv) >= 2 and sys.argv[1] == 'search':
-        if len(sys.argv) < 3:
-            print('Usage: python3 evolve.py search <keyword> [topn]')
-            sys.exit(1)
-        keyword = sys.argv[2]
-        topn    = int(sys.argv[3]) if len(sys.argv) >= 4 else 5
-        results = search_memory(keyword, topn)
-        if not results:
-            print(f'No results for "{keyword}"')
-        else:
-            print(f'Top {len(results)} results for "{keyword}":')
-            for r in results:
-                tags = ', '.join(r.get('tag', []))
-                print(f'  {r.get("ts","")} [{r.get("type","")}] count={r.get("count",1)}')
-                print(f'    tags: {tags}')
-                print(f'    {r.get("content","")[:100]}')
+def update_recent_digest(index: dict):
+    if not os.path.exists(RECENT_DIGEST):
+        digest = {}
     else:
-        events   = load_recent_events(7)
-        insights = extract_insights(events)
-        update_memory(insights)
-        update_errors_md(insights)
-        update_growth_md(insights)
-        archive_if_needed()
-        promoted_errors = get_already_promoted_errors()
-        filtered = [
-            err for err in insights['frequent_errors']
-            if not any(pe in err[:80] or err[:80] in pe for pe in promoted_errors)
-        ]
-        if filtered:
-            print(f'[evolve] Pending promotion: {filtered}')
-        if insights['new_capabilities']:
-            print(f'[evolve] New capabilities: {insights["new_capabilities"]}')
+        digest = safe_read_json(RECENT_DIGEST)
+    digest["index_snapshot"] = {
+        dim: index.get(dim, {}).get("score", 50.0) for dim in ["IQ", "EQ", "FQ"]
+    }
+    digest["updated_at"] = datetime.now(CST).isoformat()
+    safe_write_json(RECENT_DIGEST, digest)
+
+
+def main():
+    print(f"[evolve] 开始执行 — {datetime.now(CST).isoformat()}")
+
+    profile      = load_profile()
+    index        = safe_read_json(INTELLIGENCE_INDEX) if os.path.exists(INTELLIGENCE_INDEX) else {"IQ": {"score": 50.0}, "EQ": {"score": 50.0}, "FQ": {"score": 50.0}}
+    capabilities = safe_read_json(CAPABILITIES_JSON).get("capabilities", []) if os.path.exists(CAPABILITIES_JSON) else []
+
+    all_chain    = safe_read_jsonl(EVOLUTION_CHAIN)
+    unprocessed  = [e for e in all_chain if not e.get("processed", False) and e.get("source_type") != "diagnostic"]
+
+    print(f"[evolve] 待处理事件：{len(unprocessed)} 条")
+
+    if not unprocessed:
+        print("[evolve] 无待处理事件，退出。")
+        return
+
+    index, capabilities, evo_nodes, processed_ids = process_events(
+        unprocessed, all_chain, index, capabilities, profile
+    )
+
+    # 回写 evolution_chain（标记已处理）
+    updated_chain = []
+    processed_map = {e["event_id"]: e for e in unprocessed}
+    for record in all_chain:
+        eid = record.get("event_id")
+        if eid in processed_map:
+            updated_chain.append(processed_map[eid])
+        else:
+            updated_chain.append(record)
+
+    # 追加 evo nodes
+    for node in evo_nodes:
+        safe_append_jsonl(EVOLUTION_CHAIN, node)
+
+    # 更新指数
+    index["last_updated"] = datetime.now(CST).strftime("%Y-%m-%d")
+    safe_write_json(INTELLIGENCE_INDEX, index)
+
+    # 更新能力库
+    cap_data = safe_read_json(CAPABILITIES_JSON) if os.path.exists(CAPABILITIES_JSON) else {}
+    cap_data["capabilities"] = capabilities
+    safe_write_json(CAPABILITIES_JSON, cap_data)
+
+    update_recent_digest(index)
+
+    print(f"[evolve] 完成。处理事件：{len(processed_ids)} 条")
+    for dim in ["IQ", "EQ", "FQ"]:
+        print(f"  {dim}: {index.get(dim, {}).get('score', 50.0):.2f}")
+
+
+if __name__ == "__main__":
+    main()

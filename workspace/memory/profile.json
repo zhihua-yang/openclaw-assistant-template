@@ -1,0 +1,26 @@
+{
+  "EQ_process_weight": 0.2,
+  "min_learning_content_length": 12,
+  "same_task_min_sample": 3,
+  "evidence_default": "self",
+  "daily_fq_cap_per_task_type": 2,
+  "audit_expire_days": 7,
+  "capability_degradation_error_rate": 0.15,
+  "repair_cycle_max_idle_days": 60,
+  "sample_sufficient_min_task_done": 15,
+  "overconfidence_alert_threshold": 0.15,
+  "llm_budget_mode": "low",
+  "weekly_llm_call_budget": 4,
+  "allow_daily_llm_summary": false,
+  "allow_error_fix_llm_extraction": true,
+  "allow_weekly_report_llm_rewrite": true,
+  "allow_training_plan_llm_rewrite": true,
+  "context_inject_whitelist": [
+    "current_task",
+    "related_capabilities_max_3",
+    "related_antipatterns_max_3",
+    "recent_digest",
+    "goal_gap_summary",
+    "calibration_summary_1line"
+  ]
+}

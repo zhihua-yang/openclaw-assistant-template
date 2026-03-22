@@ -1,220 +1,398 @@
 #!/usr/bin/env python3
 """
-weekly_reflection.py v1.0
-每周自动生成周报，写入 memory/project.md
-- 不依赖 OpenClaw skill / payload
-- 直接读取 events.jsonl + memory/ 生成结构化周报
-- 输出 ≤200字摘要到 stdout（供 cron 日志）
-- 写一条 task-done 事件到 events.jsonl 记录周报已生成
-
-用法：
-  python3 weekly_reflection.py          # 正常运行
-  python3 weekly_reflection.py --dry-run # 只打印，不写文件
+weekly_reflection.py — 每周一 09:00 执行
+周报生成 + decay penalty 触发 + 训练计划生成
 """
-
 import json
+import os
 import sys
-import re
-from pathlib import Path
-from collections import Counter
-from datetime import datetime, timedelta, timezone
+from collections import defaultdict
+from datetime import datetime, timezone, timedelta, date
 
-# 动态推导 workspace 根目录
-BASE  = Path(__file__).parent.parent
-LOGS  = BASE / '.sys' / 'logs' / 'events.jsonl'
-PROJ  = BASE / 'memory' / 'project.md'
-CORE  = BASE / 'memory' / 'core.md'
-RECENT = BASE / 'memory' / 'recent.md'
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-DRY_RUN = '--dry-run' in sys.argv
+from utils import safe_read_json, safe_write_json, safe_read_jsonl, safe_append_jsonl
+from utils.paths import (
+    EVOLUTION_CHAIN, INTELLIGENCE_INDEX, CAPABILITIES_JSON,
+    PROFILE_JSON, GOALS_JSON, WEEKLY_SUMMARY, TRAINING_PLAN, CALIBRATION
+)
+from utils.sample_check import is_sample_sufficient
+
+CST = timezone(timedelta(hours=8))
 
 
-def load_events_last_7_days():
-    events = []
-    if not LOGS.exists():
-        return events
-    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
-    for line in LOGS.read_text(encoding='utf-8').splitlines():
-        line = line.strip()
-        if not line:
+def load_profile() -> dict:
+    if os.path.exists(PROFILE_JSON):
+        return safe_read_json(PROFILE_JSON)
+    return {}
+
+
+def get_current_week() -> str:
+    today = date.today()
+    iso = today.isocalendar()
+    return f"{iso[0]}-W{iso[1]:02d}"
+
+
+def compute_weekly_stats(chain: list) -> dict:
+    today = date.today()
+    week_start = today - timedelta(days=today.weekday())
+    last_week_start = week_start - timedelta(weeks=1)
+    last_week_end   = week_start - timedelta(days=1)
+
+    stats = {
+        "total_tasks": 0,
+        "routine": 0, "stretch": 0, "novel": 0,
+        "near_transfer": 0, "far_transfer": 0,
+        "error_driven_learning": 0,
+        "challenge_driven_learning": 0,
+        "intentional_challenges": 0,
+        "index_delta": {"IQ": 0.0, "EQ": 0.0, "FQ": 0.0},
+        "high_conf_total": 0, "high_conf_fail": 0,
+        "low_conf_total": 0, "low_conf_success": 0,
+    }
+
+    for record in chain:
+        ts = record.get("ts", "")[:10]
+        try:
+            d = date.fromisoformat(ts)
+        except Exception:
+            continue
+        if not (last_week_start <= d <= last_week_end):
+            continue
+
+        etype = record.get("event_type", "")
+
+        if etype == "task-done":
+            stats["total_tasks"] += 1
+            diff = record.get("task_difficulty", "routine")
+            stats[diff] = stats.get(diff, 0) + 1
+
+        if etype == "capability-reuse":
+            t = record.get("transfer_type", "near")
+            if t == "far":
+                stats["far_transfer"] += 1
+            else:
+                stats["near_transfer"] += 1
+
+        if etype == "learning-achievement":
+            trigger = record.get("learning_trigger", "normal")
+            if trigger == "error-driven":
+                stats["error_driven_learning"] += 1
+            elif trigger == "challenge-driven":
+                stats["challenge_driven_learning"] += 1
+
+        if etype == "intentional-challenge":
+            stats["intentional_challenges"] += 1
+
+        if record.get("scoring_decision"):
+            delta = record["scoring_decision"].get("actual_delta", {})
+            for dim in ["IQ", "EQ", "FQ"]:
+                stats["index_delta"][dim] = round(
+                    stats["index_delta"][dim] + delta.get(dim, 0.0), 4
+                )
+
+        conf = record.get("pre_task_confidence")
+        if conf == "high":
+            stats["high_conf_total"] += 1
+            if etype in ("task-rework", "user-correction"):
+                stats["high_conf_fail"] += 1
+        elif conf == "low":
+            stats["low_conf_total"] += 1
+            if etype == "task-done":
+                stats["low_conf_success"] += 1
+
+    total = stats["total_tasks"]
+    stats["routine_ratio"]  = round(stats["routine"] / total, 3) if total else 0
+    stats["stretch_ratio"]  = round(stats["stretch"] / total, 3) if total else 0
+    stats["novel_ratio"]    = round(stats["novel"]   / total, 3) if total else 0
+    stats["overconfidence_rate"]  = round(stats["high_conf_fail"] / stats["high_conf_total"], 3) if stats["high_conf_total"] else 0
+    stats["underconfidence_rate"] = round(stats["low_conf_success"] / stats["low_conf_total"], 3) if stats["low_conf_total"] else 0
+    return stats
+
+
+def detect_stage(chain: list, weeks: int = 3, threshold: float = 0.3) -> tuple:
+    weekly_net = defaultdict(float)
+    for record in chain:
+        if not record.get("scoring_decision"):
+            continue
+        ts = record.get("ts", "")[:10]
+        try:
+            d = date.fromisoformat(ts)
+        except Exception:
+            continue
+        iso = d.isocalendar()
+        week_key = f"{iso[0]}-W{iso[1]:02d}"
+        delta = record["scoring_decision"].get("actual_delta", {})
+        weekly_net[week_key] += sum(delta.values())
+
+    sorted_weeks = sorted(weekly_net.keys())[-weeks:]
+    if len(sorted_weeks) < weeks:
+        return "insufficient_data", ""
+
+    recent_nets = [weekly_net[w] for w in sorted_weeks]
+    avg_8w = sum(list(weekly_net.values())[-8:]) / max(len(list(weekly_net.values())[-8:]), 1)
+
+    if all(n < threshold for n in recent_nets):
+        return "plateau-observed", f"连续{weeks}周净增长偏低（均低于{threshold}）"
+    if recent_nets[-1] > avg_8w * 2:
+        return "breakthrough-observed", f"本周净增长（{recent_nets[-1]:.2f}）超过8周均值2倍"
+    return "steady", "正常进化节奏"
+
+
+def update_calibration(stats: dict, profile: dict):
+    period = datetime.now(CST).strftime("%Y-%m")
+    if os.path.exists(CALIBRATION):
+        cal = safe_read_json(CALIBRATION)
+        if cal.get("period") != period:
+            cal = {"period": period, "high_confidence_success": 0,
+                   "high_confidence_fail": 0, "low_confidence_success": 0, "low_confidence_fail": 0}
+    else:
+        cal = {"period": period, "high_confidence_success": 0,
+               "high_confidence_fail": 0, "low_confidence_success": 0, "low_confidence_fail": 0}
+
+    cal["high_confidence_fail"]    += stats.get("high_conf_fail", 0)
+    cal["high_confidence_success"] += stats.get("high_conf_total", 0) - stats.get("high_conf_fail", 0)
+    cal["low_confidence_success"]  += stats.get("low_conf_success", 0)
+
+    hc_total = cal["high_confidence_success"] + cal["high_confidence_fail"]
+    lc_total = cal["low_confidence_success"] + cal.get("low_confidence_fail", 0)
+
+    cal["overconfidence_rate"]  = round(cal["high_confidence_fail"] / hc_total, 3) if hc_total else 0
+    cal["underconfidence_rate"] = round(cal["low_confidence_success"] / lc_total, 3) if lc_total else 0
+
+    threshold_oc = profile.get("overconfidence_alert_threshold", 0.15)
+    if cal["overconfidence_rate"] > threshold_oc:
+        cal["calibration_summary"] = f"⚠️ 过度自信率 {cal['overconfidence_rate']:.1%}，高于阈值 {threshold_oc:.1%}，建议注意。"
+    else:
+        cal["calibration_summary"] = f"✅ 校准良好，过度自信率 {cal['overconfidence_rate']:.1%}。"
+
+    safe_write_json(CALIBRATION, cal)
+    return cal
+
+
+def check_decay_penalties(chain: list, capabilities: list) -> list:
+    """检查是否需要生成 capability-decay-penalty"""
+    from collections import defaultdict
+    penalty_events = []
+    today = date.today()
+
+    for cap in capabilities:
+        cap_id = cap.get("capability_id")
+        status = cap.get("status", "")
+        if status not in ("standard_verified", "strong_verified", "declared"):
+            continue
+
+        last_used = cap.get("last_used", "")
+        if not last_used:
             continue
         try:
-            e = json.loads(line)
-            ts = e.get('ts', '')
-            dt = datetime.fromisoformat(ts)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            if dt >= cutoff:
-                events.append(e)
+            last_date = date.fromisoformat(last_used)
         except Exception:
-            pass
-    return events
+            continue
+
+        idle_days = (today - last_date).days
+
+        # 检查是否有连续 7 天以上未打破的 forgetting-risk 或 stagnation
+        unresolved_diag_days = 0
+        for record in chain:
+            if record.get("event_type") not in ("forgetting-risk", "stagnation-warning"):
+                continue
+            if cap_id not in record.get("capability_ids", [cap_id]):
+                continue
+            ts = record.get("ts", "")[:10]
+            try:
+                d = date.fromisoformat(ts)
+                days_ago = (today - d).days
+                if days_ago <= 30 and record.get("status") == "pending":
+                    unresolved_diag_days = max(unresolved_diag_days, days_ago)
+            except Exception:
+                pass
+
+        if idle_days >= 60 or unresolved_diag_days >= 7:
+            import uuid as _uuid
+            now_ts = datetime.now(CST)
+            penalty_events.append({
+                "event_id": f"evt-{now_ts.strftime('%Y%m%d')}-{_uuid.uuid4().hex[:6]}",
+                "ts": now_ts.isoformat(),
+                "source_type": "derived",
+                "event_type": "capability-decay-penalty",
+                "title": f"能力衰减惩罚：{cap.get('display_name', cap_id)}",
+                "content": f"能力 {cap_id} 已 {idle_days} 天未复用，触发周期性衰减。",
+                "task_type": "system",
+                "capability_ids": [cap_id],
+                "evidence_level": "logical",
+                "is_primary_scoring_event": False,
+                "created_by": "weekly_reflection.py",
+                "processed": False
+            })
+
+    return penalty_events
 
 
-def summarize_events(events):
-    type_counts = Counter(e.get('type', 'unknown') for e in events)
-    all_tags = []
-    for e in events:
-        all_tags.extend(e.get('tags', e.get('tag', [])))
-    top_tags = Counter(all_tags).most_common(5)
+def generate_training_plan(stats: dict, stage: str, goals: dict, capabilities: list) -> dict:
+    tasks = []
 
-    tasks_done     = [e for e in events if e.get('type') == 'task-done']
-    errors_found   = [e for e in events if e.get('type') in ('error-found', 'error-fix')]
-    improvements   = [e for e in events if e.get('type') == 'system-improvement']
-    capabilities   = [e for e in events if e.get('type') in ('new-capability', 'learning-achievement')]
-    corrections    = [e for e in events if e.get('type') == 'user-correction']
+    if stats.get("routine_ratio", 0) > 0.6:
+        tasks.append({
+            "priority": 1,
+            "action": "安排至少 2 个 stretch 难度任务",
+            "reason": f"routine 占比 {stats['routine_ratio']:.0%}，偏高"
+        })
 
-    return {
-        'total':        len(events),
-        'type_counts':  type_counts,
-        'top_tags':     top_tags,
-        'tasks_done':   tasks_done,
-        'errors_found': errors_found,
-        'improvements': improvements,
-        'capabilities': capabilities,
-        'corrections':  corrections,
-    }
+    cap_needing_far = [
+        cap for cap in capabilities
+        if cap.get("status") == "standard_verified"
+        and cap.get("far_transfer_count", 0) == 0
+    ]
+    if cap_needing_far:
+        cap = cap_needing_far[0]
+        tasks.append({
+            "priority": 2,
+            "action": f"为 [{cap['capability_id']}] {cap.get('display_name','')} 设计 1 次 far transfer",
+            "target_capability": cap["capability_id"],
+            "reason": "缺 far transfer，无法升入 strong_verified"
+        })
 
+    if stats.get("error_driven_learning", 0) == 0:
+        tasks.append({
+            "priority": 3,
+            "action": "遇到 error-fix 时，补写 1 条 error-driven learning-achievement",
+            "reason": "上周 error-driven 学习为零"
+        })
 
-def generate_report(summary, week_str):
-    lines = [
-        f'',
-        f'## 周报 {week_str}',
-        f'',
-        f'**本周事件总计：{summary["total"]} 条**',
-        f'',
+    if stats.get("high_conf_total", 0) < 3:
+        tasks.append({
+            "priority": 4,
+            "action": "重要任务记录 pre_task_confidence",
+            "reason": "校准样本不足"
+        })
+
+    avoid = [
+        "连续 3 天只做 routine 类型任务",
+        "evidence_level 填 logical 但无系统推断依据"
     ]
 
-    # 事件类型分布
-    if summary['type_counts']:
-        lines.append('### 事件分布')
-        for t, c in summary['type_counts'].most_common():
-            lines.append(f'- {t}: {c} 条')
-        lines.append('')
-
-    # 高频 Tag
-    if summary['top_tags']:
-        tag_str = '、'.join(f'{t}×{c}' for t, c in summary['top_tags'])
-        lines.append(f'**高频 Tag**：{tag_str}')
-        lines.append('')
-
-    # 完成的任务
-    if summary['tasks_done']:
-        lines.append('### ✅ 完成的任务')
-        for e in summary['tasks_done'][:10]:
-            content = e.get('content', '').split('\n')[0][:80]
-            lines.append(f'- {content}')
-        lines.append('')
-
-    # 新能力 / 学习
-    if summary['capabilities']:
-        lines.append('### 🧠 新能力 / 学习')
-        for e in summary['capabilities'][:5]:
-            content = e.get('content', '').split('\n')[0][:80]
-            lines.append(f'- {content}')
-        lines.append('')
-
-    # 系统改进
-    if summary['improvements']:
-        lines.append('### ⚙️ 系统改进')
-        for e in summary['improvements'][:5]:
-            content = e.get('content', '').split('\n')[0][:80]
-            lines.append(f'- {content}')
-        lines.append('')
-
-    # 错误 & 修复
-    if summary['errors_found']:
-        lines.append('### 🐛 错误 & 修复')
-        for e in summary['errors_found'][:5]:
-            content = e.get('content', '').split('\n')[0][:80]
-            lines.append(f'- {content}')
-        lines.append('')
-
-    # 用户纠正
-    if summary['corrections']:
-        lines.append('### 📝 用户纠正')
-        for e in summary['corrections'][:5]:
-            content = e.get('content', '').split('\n')[0][:80]
-            lines.append(f'- {content}')
-        lines.append('')
-
-    lines.append('---')
-    return '\n'.join(lines)
-
-
-def generate_summary(summary, week_str):
-    """生成 ≤200字的摘要，输出到 stdout / cron 日志"""
-    tasks_n  = len(summary['tasks_done'])
-    caps_n   = len(summary['capabilities'])
-    errs_n   = len(summary['errors_found'])
-    improv_n = len(summary['improvements'])
-    top_tags = '、'.join(t for t, _ in summary['top_tags'][:3]) or '无'
-
-    summary_text = (
-        f'[周报 {week_str}] '
-        f'共 {summary["total"]} 条事件｜'
-        f'任务完成 {tasks_n} 项｜'
-        f'新能力 {caps_n} 项｜'
-        f'错误修复 {errs_n} 项｜'
-        f'系统改进 {improv_n} 项｜'
-        f'高频Tag：{top_tags}'
-    )
-    # 截断到200字
-    if len(summary_text) > 200:
-        summary_text = summary_text[:197] + '...'
-    return summary_text
-
-
-def append_event(content):
-    """记录周报已生成的事件"""
-    if not LOGS.exists():
-        return
-    record = {
-        'ts':      datetime.now(timezone.utc).isoformat(),
-        'type':    'task-done',
-        'content': content,
-        'tags':    ['weekly', 'cron', 'reflection'],
-        'count':   1,
+    return {
+        "week": get_current_week(),
+        "generated_by": "rules",
+        "stage": stage,
+        "tasks": tasks,
+        "avoid": avoid
     }
-    with LOGS.open('a', encoding='utf-8') as f:
-        f.write(json.dumps(record, ensure_ascii=False) + '\n')
 
 
-def write_to_project_md(report):
-    """追加写入 memory/project.md，保留历史"""
-    PROJ.parent.mkdir(parents=True, exist_ok=True)
-    if not PROJ.exists():
-        PROJ.write_text('# Project Memory\n_周报由 weekly_reflection.py 自动生成_\n', encoding='utf-8')
-    existing = PROJ.read_text(encoding='utf-8')
-    PROJ.write_text(existing + report, encoding='utf-8')
+def render_weekly_report(summary: dict, cal: dict) -> str:
+    index = summary.get("index_after", {})
+    delta = summary.get("index_delta", {})
+
+    def fmt_delta(v):
+        return f"+{v:.2f} ↑" if v > 0 else f"{v:.2f} ↓" if v < 0 else "0.00 →"
+
+    lines = [
+        "# OpenClaw 周报",
+        f"\n> 周次：{summary.get('week')} | 生成时间：{datetime.now(CST).strftime('%Y-%m-%d %H:%M')}",
+        "\n## 📊 本周指数",
+        "| 指数 | 本周变化 |",
+        "|---|---|",
+    ]
+    for dim in ["IQ", "EQ", "FQ"]:
+        lines.append(f"| {dim} | {fmt_delta(delta.get(dim, 0))} |")
+
+    lines += [
+        "\n## 🧭 学习区分布（本周）",
+        f"- routine：{summary.get('routine_ratio', 0):.0%} | stretch：{summary.get('stretch_ratio', 0):.0%} | novel：{summary.get('novel_ratio', 0):.0%}",
+        "\n## 🔁 能力迁移",
+        f"- near transfer：{summary.get('near_transfer_count', 0)} | far transfer：{summary.get('far_transfer_count', 0)}",
+        "\n## 🧠 错误/挑战驱动学习",
+        f"- error-driven：{summary.get('error_driven_learning_count', 0)} | challenge-driven：{summary.get('challenge_driven_learning_count', 0)}",
+        "\n## 🎯 元认知校准",
+        f"- {cal.get('calibration_summary', '无数据')}",
+    ]
+
+    if not summary.get("sample_sufficient"):
+        count = summary.get("sample_count", 0)
+        lines += [
+            "\n## 📈 成长阶段",
+            f"- 数据积累中（当前 {count} 个有效任务，目标 ≥ 15）",
+            "- plateau / breakthrough 判断将在样本充足后启用"
+        ]
+    else:
+        stage = summary.get("stage", "steady")
+        reason = summary.get("stage_reason", "")
+        lines += [
+            "\n## 📈 成长阶段",
+            f"- 当前：{stage}",
+            f"- 原因：{reason}"
+        ]
+
+    return "\n".join(lines)
 
 
 def main():
-    now      = datetime.now(timezone.utc)
-    week_str = now.strftime('%Y-W%W')  # e.g. 2026-W12
+    import argparse
+    parser = argparse.ArgumentParser(description="OpenClaw 周反思")
+    parser.add_argument("--dry-run", action="store_true", help="只打印不写入")
+    args = parser.parse_args()
 
-    events  = load_events_last_7_days()
-    summary = summarize_events(events)
-    report  = generate_report(summary, week_str)
-    short   = generate_summary(summary, week_str)
+    print(f"[weekly] 开始执行 — {datetime.now(CST).isoformat()}")
 
-    if DRY_RUN:
-        print('[weekly_reflection] DRY RUN — 不写入文件')
-        print()
-        print('=== 周报内容 ===')
+    profile      = load_profile()
+    chain        = safe_read_jsonl(EVOLUTION_CHAIN)
+    capabilities = safe_read_json(CAPABILITIES_JSON).get("capabilities", []) if os.path.exists(CAPABILITIES_JSON) else []
+    goals        = safe_read_json(GOALS_JSON) if os.path.exists(GOALS_JSON) else {}
+    index        = safe_read_json(INTELLIGENCE_INDEX) if os.path.exists(INTELLIGENCE_INDEX) else {}
+
+    min_tasks = profile.get("sample_sufficient_min_task_done", 15)
+    sufficient, count = is_sample_sufficient(EVOLUTION_CHAIN, min_tasks)
+
+    stats = compute_weekly_stats(chain)
+    stage, stage_reason = detect_stage(chain)
+    cal   = update_calibration(stats, profile)
+
+    summary = {
+        "week": get_current_week(),
+        "delta": stats["index_delta"],
+        "routine_ratio":  stats["routine_ratio"],
+        "stretch_ratio":  stats["stretch_ratio"],
+        "novel_ratio":    stats["novel_ratio"],
+        "near_transfer_count":  stats["near_transfer"],
+        "far_transfer_count":   stats["far_transfer"],
+        "error_driven_learning_count":   stats["error_driven_learning"],
+        "challenge_driven_learning_count": stats["challenge_driven_learning"],
+        "intentional_challenge_count": stats["intentional_challenges"],
+        "overconfidence_rate":  stats["overconfidence_rate"],
+        "underconfidence_rate": stats["underconfidence_rate"],
+        "stage":         stage,
+        "stage_reason":  stage_reason,
+        "sample_sufficient": sufficient,
+        "sample_count":  count,
+        "top_issue":     "routine 偏高" if stats["routine_ratio"] > 0.6 else "正常"
+    }
+
+    # decay penalty
+    penalty_events = check_decay_penalties(chain, capabilities)
+
+    training_plan = generate_training_plan(stats, stage, goals, capabilities)
+    report        = render_weekly_report(summary, cal)
+
+    if args.dry_run:
+        print("\n=== 周报预览 ===")
         print(report)
-        print()
-        print('=== 摘要（≤200字）===')
-        print(short)
-        return 0
+        print("\n=== 训练计划 ===")
+        print(json.dumps(training_plan, ensure_ascii=False, indent=2))
+        print(f"\n=== Decay Penalty 待写入：{len(penalty_events)} 条 ===")
+        return
 
-    write_to_project_md(report)
-    append_event(f'weekly-self-reflection 周报已生成：{week_str}，共 {summary["total"]} 条事件')
+    safe_write_json(WEEKLY_SUMMARY, summary)
+    safe_write_json(TRAINING_PLAN, training_plan)
 
-    print(short)
-    print(f'[weekly_reflection] 周报已写入：{PROJ}')
-    return 0
+    for pe in penalty_events:
+        safe_append_jsonl(EVOLUTION_CHAIN, pe)
+        print(f"[weekly] 写入 decay-penalty：{pe['event_id']} ({pe['capability_ids']})")
+
+    print(report)
+    print(f"\n[weekly] 完成。样本充足：{sufficient}（{count}/{min_tasks}）")
 
 
-if __name__ == '__main__':
-    sys.exit(main())
+if __name__ == "__main__":
+    main()

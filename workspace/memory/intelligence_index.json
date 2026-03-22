@@ -1,0 +1,32 @@
+{
+  "IQ": {
+    "score": 50.0,
+    "components": {
+      "novel_problem_solved": 0,
+      "debug_success_rate": 0.0,
+      "validated_capability_count": 0,
+      "repeat_error_rate": 0.0
+    }
+  },
+  "EQ": {
+    "score": 50.0,
+    "components": {
+      "EQ_external": 50.0,
+      "EQ_process": 50.0,
+      "user_correction_count": 0,
+      "positive_feedback_count": 0
+    },
+    "weights": {"EQ_external": 0.8, "EQ_process": 0.2}
+  },
+  "FQ": {
+    "score": 50.0,
+    "components": {
+      "first_attempt_success_rate": 0.0,
+      "rework_rate": 0.0,
+      "priority_accuracy": 0.0
+    }
+  },
+  "baseline_date": "2026-03-22",
+  "last_updated": "2026-03-22",
+  "version": "v3.11.1-Lite"
+}

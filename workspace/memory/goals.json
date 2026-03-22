@@ -1,0 +1,14 @@
+{
+  "result_goals": {
+    "IQ": {"current": 50.0, "target_6m": 70.0},
+    "EQ": {"current": 50.0, "target_6m": 75.0},
+    "FQ": {"current": 50.0, "target_6m": 70.0}
+  },
+  "capability_goals": [],
+  "training_goals": {
+    "intentional_challenge_per_week": 2,
+    "stretch_ratio_target": 0.35,
+    "error_driven_learning_per_week": 1,
+    "overconfidence_rate_max": 0.15
+  }
+}
