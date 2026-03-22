@@ -1,48 +1,83 @@
 #!/usr/bin/env python3
 """
-session_note_writer.py v3.6
-修复：写入路径统一为 .sys/logs/events.jsonl（v3.5 错误写入 .openclaw/logs/）
+session_note_writer.py — OpenClaw v3.11.1-Lite
+告别词触发时，将会话摘要写入新管道 memory/evolution_chain.jsonl
+不再直接写 .sys/logs/events.jsonl 旧格式
+
+调用方：farewell_detector.py
+用法（farewell_detector.py 内部调用）：
+  python3 session_note_writer.py \
+    --type task-done \
+    --content "会话结束：完成邮件修复" \
+    --task-type session-summary \
+    --evidence self
 """
 
-import json
-import os
+import argparse
+import subprocess
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
-# ── 唯一权威路径（与 create_event.py、evolve.py 保持一致）──────────
-BASE       = Path.home() / ".openclaw/workspace"
-EVENTS_LOG = BASE / ".sys/logs/events.jsonl"   # ✅ 正确路径
-SESSIONS   = BASE / ".sys/sessions"
-
-EVENTS_LOG.parent.mkdir(parents=True, exist_ok=True)
-SESSIONS.mkdir(parents=True, exist_ok=True)
+SCRIPTS_DIR = Path(__file__).parent
+CREATE_EVENT = SCRIPTS_DIR / "create_event.py"
 
 
-def append_event(event_type: str, content: str, tags: list = None, count: int = 1):
-    """写入一条事件到 .sys/logs/events.jsonl（唯一路径）"""
-    record = {
-        "ts":      datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "type":    event_type,
-        "tag":     tags or [],
-        "content": content,
-        "count":   count,
-    }
-    with EVENTS_LOG.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    print(f"[session_note_writer] event written → {EVENTS_LOG}")
+def build_cmd(args) -> list:
+    """把 session_note_writer 的参数翻译成 create_event.py 的参数列表"""
+    cmd = [
+        sys.executable, str(CREATE_EVENT),
+        "--type",    args.type,
+        "--content", args.content,
+    ]
+    if args.task_type:
+        cmd += ["--task-type", args.task_type]
+    if args.evidence:
+        cmd += ["--evidence", args.evidence]
+    if args.note:
+        cmd += ["--note", args.note]
+    if args.cap:
+        cmd += ["--cap", args.cap]
+    if args.difficulty:
+        cmd += ["--difficulty", args.difficulty]
+    return cmd
 
 
-def save_session_notes(session_id: str, content: str):
-    """保存会话摘要到 .sys/sessions/"""
-    ts   = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    path = SESSIONS / f"{ts}_{session_id}.md"
-    path.write_text(content, encoding="utf-8")
-    print(f"[session_note_writer] session saved → {path}")
-    return path
+def main():
+    parser = argparse.ArgumentParser(
+        description="session_note_writer — 告别词触发，写入新管道 create_event.py"
+    )
+    # 保持与 farewell_detector.py 现有调用签名兼容
+    parser.add_argument("--type",       default="task-done",      help="事件类型（默认 task-done）")
+    parser.add_argument("--content",    required=True,            help="会话摘要内容")
+    parser.add_argument("--task-type",  default="session-summary", help="任务类型标签")
+    parser.add_argument("--evidence",   default="self",           help="证据等级（默认 self）")
+    parser.add_argument("--note",       default=None,             help="备注")
+    parser.add_argument("--cap",        default=None,             help="关联能力 ID")
+    parser.add_argument("--difficulty", default=None,             help="任务难度")
+    # 旧版 --tags 参数：静默忽略，不传给 create_event.py（新版无此参数）
+    parser.add_argument("--tags",       default=None,             help="[已废弃] 旧版标签，静默忽略")
+
+    args = parser.parse_args()
+
+    if not CREATE_EVENT.exists():
+        print(f"❌ 找不到 create_event.py: {CREATE_EVENT}", file=sys.stderr)
+        sys.exit(1)
+
+    cmd = build_cmd(args)
+
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        print(result.stdout, end="")
+        if result.stderr:
+            print(result.stderr, end="", file=sys.stderr)
+    except subprocess.CalledProcessError as e:
+        print(f"❌ create_event.py 调用失败 (exit {e.returncode})", file=sys.stderr)
+        if e.stdout:
+            print(e.stdout, end="")
+        if e.stderr:
+            print(e.stderr, end="", file=sys.stderr)
+        sys.exit(e.returncode)
 
 
 if __name__ == "__main__":
-    # 快速测试
-    append_event("system-monitoring", "session_note_writer v3.6 路径修复验证", ["test"])
-    print("✅ 路径验证完成，事件写入 .sys/logs/events.jsonl")
+    main()
