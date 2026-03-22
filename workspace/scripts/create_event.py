@@ -225,7 +225,7 @@ def main():
     parser.add_argument("--evidence",         type=str,            choices=VALID_EVIDENCES,       help="证据等级（external/self）")
     parser.add_argument("--evidence-ref",     type=str,            help="证据引用（如 log:xxx、screenshot:xxx）")
     parser.add_argument("--cap",              type=str,            help="关联能力 ID（如 cap_smtp_debug）")
-    parser.add_argument("--parent",           type=str",           help="父事件 ID（派生事件必填）")
+    parser.add_argument("--parent",           type=str,           help="父事件 ID（派生事件必填）")
     parser.add_argument("--trigger",          type=str,            choices=VALID_TRIGGERS,        help="触发类型")
     parser.add_argument("--cognitive-update", type=str,            help="认知更新描述（learning-achievement 推荐填写）")
     parser.add_argument("--transfer",         type=str,            choices=VALID_TRANSFERS,       help="迁移类型（near/far）")
