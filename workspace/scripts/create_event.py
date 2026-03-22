@@ -271,9 +271,12 @@ def main():
     # 写入 evolution_chain.jsonl
     append_event(event)
 
-    print(f"✅ 事件已写入: {event['id']}")
-    print(f"   类型     : {event['type']}")
+     # ✅ 修复：全部引用新字段名，与 Schema 对齐
+    print(f"✅ 事件已写入: {event['event_id']}")   # 旧: event['id']
+    print(f"   类型     : {event['event_type']}")   # 旧: event['type']
     print(f"   日期     : {event['date']}")
+    print(f"   时间戳   : {event['ts']}")           # 旧: event['created_at']
+    print(f"   来源分类 : {event['source_type']}")  # 旧: event['event_class']
     print(f"   证据等级 : {event['evidence_level']}")
     print(f"   文件     : {CHAIN}")
 
