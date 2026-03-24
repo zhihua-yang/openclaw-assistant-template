@@ -91,7 +91,7 @@ def run_diagnostics(events, queue, profile):
     new_diags = []
 
     # ── 1. stagnation-warning：连续 3 天无 learning-achievement ──
-    learning_dates = {e["date"] for e in events if e.get("type") == "learning-achievement"}
+    learning_dates = {e["date"] for e in events if e.get("event_type") == "learning-achievement"}
     streak = 0
     for i in range(7):
         day = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
@@ -111,7 +111,7 @@ def run_diagnostics(events, queue, profile):
     recent7 = [e for e in events if e.get("date", "") >= (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")]
     error_types: dict = {}
     for e in recent7:
-        if e.get("type") in ("error-found", "error-fix", "user-correction"):
+        if e.get("event_type") in ("error-found", "error-fix", "user-correction"):
             tt = e.get("task_type", "unknown")
             error_types[tt] = error_types.get(tt, 0) + 1
     for tt, cnt in error_types.items():
@@ -124,7 +124,7 @@ def run_diagnostics(events, queue, profile):
             ) | {"target_date": tt})
 
     # ── 3. comfort-zone-warning：routine 占比 > 70%（近30天）──
-    recent30_done = [e for e in events if e.get("type") == "task-done"]
+    recent30_done = [e for e in events if e.get("event_type") == "task-done"]
     if len(recent30_done) >= 10:
         routine_cnt = sum(1 for e in recent30_done if e.get("difficulty", "routine") == "routine")
         ratio = routine_cnt / len(recent30_done)
@@ -138,10 +138,10 @@ def run_diagnostics(events, queue, profile):
 
     # ── 4. suspected-missing-learning：task-done 含学习关键词但无派生 ──
     LEARN_KEYWORDS = ["学到", "理解了", "发现", "原来", "搞懂", "根因", "排查", "复盘"]
-    task_done_ids = {e.get("task_id") for e in events if e.get("type") == "task-done"}
+    task_done_ids = {e.get("task_id") for e in events if e.get("event_type") == "task-done"}
     derived_parents = {e.get("parent_id") for e in events if e.get("parent_id")}
     for e in events:
-        if e.get("type") != "task-done":
+        if e.get("event_type") != "task-done":
             continue
         content = e.get("content", "")
         if any(kw in content for kw in LEARN_KEYWORDS):
@@ -157,7 +157,7 @@ def run_diagnostics(events, queue, profile):
                     ) | {"target_date": diag_key})
 
     # ── 5. overconfidence-warning：高置信失败率 > 15% ──
-    high_conf = [e for e in events if e.get("confidence") == "high" and e.get("type") == "task-done"]
+    high_conf = [e for e in events if e.get("confidence") == "high" and e.get("event_type") == "task-done"]
     if len(high_conf) >= 5:
         fails = [e for e in high_conf if e.get("outcome") == "fail"]
         fail_rate = len(fails) / len(high_conf)
@@ -171,7 +171,7 @@ def run_diagnostics(events, queue, profile):
             ))
 
     # ── 6. underconfidence-warning：低置信成功率 > 25% ──
-    low_conf = [e for e in events if e.get("confidence") == "low" and e.get("type") == "task-done"]
+    low_conf = [e for e in events if e.get("confidence") == "low" and e.get("event_type") == "task-done"]
     if len(low_conf) >= 5:
         successes = [e for e in low_conf if e.get("outcome") == "success"]
         succ_rate = len(successes) / len(low_conf)
@@ -182,6 +182,42 @@ def run_diagnostics(events, queue, profile):
                 f"近30天 {len(low_conf)} 条低置信任务中，{len(successes)} 条结果为 success",
                 "实际表现优于预期，建议提升自我评估准确度"
             ))
+
+    # ── 8. missing-event-today：昨天有任务类事件应录但为 0 ──
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    yesterday_events = [e for e in events if e.get("date") == yesterday
+                        and e.get("event_type") in ("task-done", "error-fix", "error-found",
+                                              "user-correction", "system-improvement",
+                                              "learning-achievement", "capability-reuse")]
+    if len(yesterday_events) == 0 and not already_diagnosed(queue, "missing-event-today", yesterday):
+        new_diags.append(make_diag(
+            "missing-event-today",
+            f"{yesterday} 无任何事件录入",
+            f"昨天（{yesterday}）evolution_chain.jsonl 中无任何有效任务事件，可能存在漏录",
+            "回顾昨天的对话，补录遗漏的 task-done / error-fix / learning-achievement 事件"
+        ) | {"target_date": yesterday})
+
+    # ── 9. correction-without-learning：user-correction 后 2 天内无 learning-achievement ──
+    corrections = [e for e in events
+                   if e.get("event_type") == "user-correction"
+                   and e.get("date", "") >= (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")]
+    derived_parents = {e.get("parent_id") for e in events if e.get("parent_id")}
+    for corr in corrections:
+        cid = corr.get("task_id") or corr.get("id")
+        cdate = corr.get("date", "")
+        # 检查该 correction 后 2 天内是否有以它为 parent 的 learning-achievement
+        followup = [e for e in events
+                    if e.get("event_type") == "learning-achievement"
+                    and e.get("parent_id") == cid]
+        if not followup:
+            diag_key = f"correction-without-learning-{cid}"
+            if not already_diagnosed(queue, "correction-without-learning", diag_key):
+                new_diags.append(make_diag(
+                    "correction-without-learning",
+                    f"user-correction 未跟进 learning-achievement：{corr.get('content','')[:40]}",
+                    f"事件 {cid}（{cdate}）是 user-correction，但未找到以其为 parent 的 learning-achievement",
+                    "补录 learning-achievement，记录从此次纠正中提炼的认知更新（--parent 指向该 correction）"
+                ) | {"target_date": diag_key})
 
     # ── 7. plateau-detected：连续 3 周净增长 < 0.3 ──
     iq_events = [e for e in events if e.get("iq_delta") is not None]

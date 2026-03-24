@@ -38,9 +38,9 @@ def cmd_list(args):
         return
     print(f"📋 待处理建议（{len(pending)} 条）：\n")
     for r in pending:
-        print(f"  [{r['diag_id']}] {r['diagnostic_type']} ({r['severity']})")
-        print(f"    建议操作：{r['recommended_action']}")
-        print(f"    创建时间：{r['ts'][:10]}")
+        print(f"  [{r['id']}] {r['diag_type']} ({r.get('severity', 'info')})")
+        print(f"    建议操作：{r.get('suggestion', r.get('recommended_action', '无'))}")
+        print(f"    创建时间：{(r.get('ts') or r.get('created_at', ''))[:10]}")
         if r.get("related_event_ids"):
             print(f"    相关事件：{r['related_event_ids']}")
         print()
@@ -50,7 +50,7 @@ def cmd_adopt(args):
     records = load_queue()
     found = False
     for r in records:
-        if r.get("diag_id") == args.diag_id:
+        if r.get("id") == args.diag_id:
             if r.get("status") != "pending":
                 print(f"⚠️ 该建议状态为 {r['status']}，无法采纳。")
                 return
@@ -58,7 +58,7 @@ def cmd_adopt(args):
             r["processed_at"] = datetime.now(CST).isoformat()
             found = True
             print(f"✅ 已采纳：{args.diag_id}")
-            print(f"   类型：{r['diagnostic_type']}")
+            print(f"   类型：{r['diag_type']}")
             print(f"   建议后续操作：create_event.py 录入对应派生事件")
             break
     if not found:
@@ -71,7 +71,7 @@ def cmd_dismiss(args):
     records = load_queue()
     found = False
     for r in records:
-        if r.get("diag_id") == args.diag_id:
+        if r.get("id") == args.diag_id:
             if r.get("status") != "pending":
                 print(f"⚠️ 该建议状态为 {r['status']}，无法忽略。")
                 return

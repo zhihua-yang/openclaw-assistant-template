@@ -52,7 +52,7 @@ def compute_weekly_stats(chain: list) -> dict:
     }
 
     for record in chain:
-        ts = record.get("ts", "")[:10]
+        ts = (record.get("ts") or "")[:10]
         try:
             d = date.fromisoformat(ts)
         except Exception:
@@ -115,7 +115,7 @@ def detect_stage(chain: list, weeks: int = 3, threshold: float = 0.3) -> tuple:
     for record in chain:
         if not record.get("scoring_decision"):
             continue
-        ts = record.get("ts", "")[:10]
+        ts = (record.get("ts") or "")[:10]
         try:
             d = date.fromisoformat(ts)
         except Exception:
@@ -199,7 +199,7 @@ def check_decay_penalties(chain: list, capabilities: list) -> list:
                 continue
             if cap_id not in record.get("capability_ids", [cap_id]):
                 continue
-            ts = record.get("ts", "")[:10]
+            ts = (record.get("ts") or "")[:10]
             try:
                 d = date.fromisoformat(ts)
                 days_ago = (today - d).days
