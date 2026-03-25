@@ -38,7 +38,7 @@ SYS="$WORKSPACE/.sys"
 LOGS="$SYS/logs"
 SCRIPTS="$WORKSPACE/scripts"
 UTILS="$SCRIPTS/utils"
-DOCS="$WORKSPACE/doc"
+DOCS="$WORKSPACE/docs"
 
 echo "================================================"
 echo " OpenClaw v3.11.1-Lite Setup"
