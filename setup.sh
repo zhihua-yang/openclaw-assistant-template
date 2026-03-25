@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # OpenClaw v3.11.1-Lite setup.sh
 # 用法1（全新实例）: bash setup.sh
-#   → workspace 目录在仓库内，原地初始化
-# 用法2（升级旧实例）: bash setup.sh --target /root/.openclaw/workspace
+#   → 自动探测工作区路径，找不到则在仓库内原地初始化
+# 用法2（升级旧实例，显式指定）: bash setup.sh --target /path/to/workspace
 #   → 直接升级指定工作区，脚本/AGENTS.md/docs/* 同步过去
 
 set -e
@@ -23,10 +23,25 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# ── 自动探测工作区路径 ────────────────────────────
+# 优先级：
+#   1. --target 显式参数（最高优先级）
+#   2. OpenClaw 环境变量 GF_IDE_DEFAULT_PROJECT_ROOT
+#   3. 探测标准路径 ~/.openclaw/workspace（有 AGENTS.md 特征文件则认定为已有工作区）
+#   4. 回退：仓库内 workspace 目录（全新安装）
+
 if [ -n "$TARGET_WORKSPACE" ]; then
   WORKSPACE="$TARGET_WORKSPACE"
   COPY_MODE=true
-  MODE_LABEL="升级已有工作区"
+  MODE_LABEL="升级已有工作区（--target 显式指定）"
+elif [ -n "$GF_IDE_DEFAULT_PROJECT_ROOT" ]; then
+  WORKSPACE="$GF_IDE_DEFAULT_PROJECT_ROOT"
+  COPY_MODE=true
+  MODE_LABEL="升级已有工作区（GF_IDE_DEFAULT_PROJECT_ROOT 自动探测）"
+elif [ -d "$HOME/.openclaw/workspace" ] && [ -f "$HOME/.openclaw/workspace/AGENTS.md" ]; then
+  WORKSPACE="$HOME/.openclaw/workspace"
+  COPY_MODE=true
+  MODE_LABEL="升级已有工作区（~/.openclaw/workspace 自动探测）"
 else
   WORKSPACE="$REPO_DIR/workspace"
   COPY_MODE=false
@@ -46,6 +61,17 @@ echo " 模式      : $MODE_LABEL"
 echo " REPO      : $REPO_DIR"
 echo " WORKSPACE : $WORKSPACE"
 echo "================================================"
+
+# 安全检查：防止工作区路径嵌套在仓库目录内（飘移检测）
+if [[ "$WORKSPACE" == "$REPO_DIR"* ]] && [ "$COPY_MODE" = false ]; then
+  echo ""
+  echo " ⚠️  警告：工作区路径在仓库目录内（$WORKSPACE）"
+  echo "    这是全新安装模式，属于预期行为。"
+  echo "    如果你是升级旧实例，请确认工作区路径是否正确。"
+  echo "    如需指定已有工作区，请使用："
+  echo "      bash setup.sh --target ~/.openclaw/workspace"
+  echo ""
+fi
 
 # ── Step 1：前提条件检查 & 依赖安装 ──────────────
 echo ""
@@ -374,10 +400,16 @@ CRONEOF
 chmod +x "$WORKSPACE/install-cron.sh"
 echo " ✅ install-cron.sh 已生成 → $WORKSPACE/install-cron.sh"
 
-# ── Step 7：健康检查（略，沿用原有逻辑即可） ──────
-# 为保持回答长度，这里不改动你的原有 Step 7/8 逻辑，直接照旧保留即可。
-
 echo ""
 echo "================================================"
-echo " OpenClaw v3.11.1-Lite Setup 完成（含 docs/ 支持）"
+echo " OpenClaw v3.11.1-Lite Setup 完成"
+echo " 工作区路径: $WORKSPACE"
 echo "================================================"
+echo ""
+echo " 下一步："
+if [ "$COPY_MODE" = false ]; then
+  echo "   1. OpenClaw 启动时请将 workspace 目录指向: $WORKSPACE"
+  echo "   2. 安装定时任务: bash $WORKSPACE/install-cron.sh"
+else
+  echo "   1. 安装/更新定时任务: bash $WORKSPACE/install-cron.sh"
+fi
